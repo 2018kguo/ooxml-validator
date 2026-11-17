@@ -579,6 +579,10 @@ impl<'a> Part<'a> {
                             };
                             self.error(id, qname, format!("The element '{qname}' {what}."));
                         }
+                        Verdict::NotMember(i) => {
+                            let kid = self.kid_names[f.kids_start + i];
+                            self.error("Sch_InvalidElementContentExpectingComplex", qname, format!("The element '{qname}' has invalid child element '{kid}'."));
+                        }
                         Verdict::Repeated(i) => {
                             let kid = self.kid_names[f.kids_start + i];
                             self.error("Sch_AllElement", qname, format!("The element '{qname}' has child element '{kid}' more than once."));

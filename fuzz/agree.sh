@@ -17,7 +17,7 @@ cargo build -q --release
 
 docs=$work/docs
 mkdir -p "$docs"
-find "$sdk/test" -name '*.docx' > "$docs/sdk.txt"
+find "$sdk/test" -name '*.docx' | LC_ALL=C sort > "$docs/sdk.txt"
 python3 fuzz/mutate.py "$docs/sdk.txt" "$docs/mutants" "${MUTANTS:-600}" "${SEED:-1}" > /dev/null
 python3 bench/generate.py "$docs/report.docx" 40 > /dev/null
 python3 fuzz/cases.py "$docs/cases" > /dev/null

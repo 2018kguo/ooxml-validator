@@ -267,6 +267,9 @@ pub enum Verdict {
     Unexpected(usize),
     /// All: this member repeats (Sch_AllElement).
     Repeated(usize),
+    /// All: this child is not a member; whatever it is, the SDK says
+    /// Sch_InvalidElementContentExpectingComplex.
+    NotMember(usize),
 }
 
 pub fn validate(root: u32, kids: &[Kid], parent_ns: u32) -> Verdict {
@@ -286,7 +289,7 @@ pub fn validate(root: u32, kids: &[Kid], parent_ns: u32) -> Verdict {
                     return Verdict::Ok;
                 }
                 let member = q.items.iter().any(|&c| p(c).kind == ParticleKind::Element && p(c).element == kids[next].ty && kids[next].ty != NONE);
-                return if m != Match::No && member { Verdict::Repeated(next) } else { Verdict::Unexpected(next) };
+                return if m != Match::No && member { Verdict::Repeated(next) } else { Verdict::NotMember(next) };
             }
             // EmitInvalidElementError re-runs the match collecting expected
             // children; the verdict is the same match.

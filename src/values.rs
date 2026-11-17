@@ -198,6 +198,10 @@ pub fn number(kind: ValueKind, s: &str) -> Option<f64> {
         SingleValue => return double(s).map(|v| v as f32 as f64),
         _ => return None,
     };
+    // XmlConvert parses the unsigned classes without AllowLeadingSign: "+0" and "-0" fail.
+    if min == 0 && matches!(trim(s).as_bytes().first(), Some(b'+' | b'-')) {
+        return None;
+    }
     let v = integer(s)?;
     (min..=max).contains(&v).then_some(v as f64)
 }
@@ -212,6 +216,9 @@ mod tests {
         assert_eq!(number(Int32Value, " +12 "), Some(12.0));
         assert_eq!(number(Int32Value, "1.0"), None);
         assert_eq!(number(UInt32Value, "-1"), None);
+        assert_eq!(number(UInt64Value, "-0"), None);
+        assert_eq!(number(UInt32Value, "+1"), None);
+        assert_eq!(number(SByteValue, "-0"), Some(0.0));
         assert_eq!(number(Int32Value, "2147483648"), None);
         assert!(is_valid(DoubleValue, 0, "1.5e3") && is_valid(DoubleValue, 0, "-INF") && !is_valid(DoubleValue, 0, "Infinity"));
         assert!(is_valid(OnOffValue, 0, "on") && !is_valid(OnOffValue, 0, "On") && !is_valid(OnOffValue, 0, ""));
