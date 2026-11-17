@@ -40,6 +40,9 @@ pub struct Reader<'a> {
     pub attrs: Vec<RawAttr<'a>>,
     open: Vec<&'a [u8]>,
     seen_root: bool,
+    /// The whole buffer is valid UTF-8 with no illegal control characters:
+    /// text and values need no per-piece check, and convert unchecked.
+    pub clean: bool,
 }
 
 #[inline]
@@ -59,7 +62,10 @@ impl<'a> Reader<'a> {
     pub fn new(buf: &'a [u8]) -> Self {
         // A UTF-8 byte order mark is not content.
         let pos = if buf.starts_with(&[0xEF, 0xBB, 0xBF]) { 3 } else { 0 };
-        Reader { buf, pos, attrs: Vec::with_capacity(16), open: Vec::with_capacity(64), seen_root: false }
+        // One vectorizable pass over the bytes, instead of a check per piece.
+        let control = buf.iter().fold(false, |any, &c| any | ((c < 0x20) & (c != b'\t') & (c != b'\r') & (c != b'\n')));
+        let clean = !control && std::str::from_utf8(buf).is_ok();
+        Reader { buf, pos, attrs: Vec::with_capacity(16), open: Vec::with_capacity(64), seen_root: false, clean }
     }
 
     pub fn offset(&self) -> usize {
@@ -107,7 +113,7 @@ impl<'a> Reader<'a> {
                     }
                     return err(at, "data at the root level is invalid");
                 }
-                check_text(raw, at)?;
+                check_text(raw, at, self.clean)?;
                 return Ok(Event::Text { raw, cdata: false });
             }
             match rest.get(1) {
@@ -201,7 +207,7 @@ impl<'a> Reader<'a> {
                             return err(vstart + len, "'<' in an attribute value");
                         }
                         let value = &self.buf[vstart..vstart + len];
-                        check_text(value, vstart)?;
+                        check_text(value, vstart, self.clean)?;
                         if self.attrs.iter().any(|a| a.name == aname) {
                             return err(before, format!("'{}' is a duplicate attribute name", String::from_utf8_lossy(aname)));
                         }
@@ -215,10 +221,13 @@ impl<'a> Reader<'a> {
 }
 
 /// Legal characters and well-formed references in text or a value.
-fn check_text(raw: &[u8], at: usize) -> Result<(), XmlError> {
+fn check_text(raw: &[u8], at: usize, clean: bool) -> Result<(), XmlError> {
     let mut i = 0;
     while let Some(j) = memchr3(b'&', b'>', 0x00, &raw[i..]).map(|j| i + j).or_else(|| {
         // Control characters other than tab, CR and LF are not legal XML.
+        if clean {
+            return None;
+        }
         raw[i..].iter().position(|&c| c < 0x20 && !matches!(c, b'\t' | b'\r' | b'\n')).map(|j| i + j)
     }) {
         let c = raw[j];
@@ -241,6 +250,9 @@ fn check_text(raw: &[u8], at: usize) -> Result<(), XmlError> {
         if i >= raw.len() {
             break;
         }
+    }
+    if clean {
+        return Ok(());
     }
     if raw.iter().any(|&c| c < 0x20 && !matches!(c, b'\t' | b'\r' | b'\n')) {
         let j = raw.iter().position(|&c| c < 0x20 && !matches!(c, b'\t' | b'\r' | b'\n')).unwrap();
@@ -271,7 +283,18 @@ fn xml_char(c: u32) -> Option<char> {
 /// A value with its references replaced (and line ends normalized, as the
 /// XML spec requires of parsers). Borrowed when nothing changes.
 pub fn unescape(raw: &[u8], attribute: bool) -> Cow<'_, str> {
-    let s = std::str::from_utf8(raw).unwrap_or("");
+    unescape_in(raw, attribute, false)
+}
+
+/// As `unescape`, for bytes from a clean Reader (known valid UTF-8).
+pub fn unescape_in(raw: &[u8], attribute: bool, clean: bool) -> Cow<'_, str> {
+    let s = if clean {
+        // SAFETY: the Reader checked the whole buffer is valid UTF-8, and its
+        // pieces split only at ASCII delimiters.
+        unsafe { std::str::from_utf8_unchecked(raw) }
+    } else {
+        std::str::from_utf8(raw).unwrap_or("")
+    };
     if memchr3(b'&', b'\r', if attribute { b'\t' } else { b'&' }, raw).is_none() && !(attribute && memchr(b'\n', raw).is_some()) {
         return Cow::Borrowed(s);
     }

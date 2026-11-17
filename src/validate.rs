@@ -9,7 +9,7 @@ use crate::schema::*;
 use crate::schema_gen::*;
 use crate::semantic::{self, Deferred, Facts, Outcome, Rels, Seen};
 use crate::values;
-use crate::xml::{Event, Reader, XmlError, unescape};
+use crate::xml::{Event, Reader, XmlError, unescape, unescape_in};
 use regex::Regex;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -33,6 +33,21 @@ pub struct ValidationError {
 fn trace() -> bool {
     static T: OnceLock<bool> = OnceLock::new();
     *T.get_or_init(|| std::env::var_os("PROOF_TRACE").is_some())
+}
+
+/// A prefix packed into a u64: up to 7 bytes exactly (with the length), else
+/// its length and first 7 bytes (then compared in full).
+fn key(p: &[u8]) -> u64 {
+    let mut k = (p.len().min(255) as u64) << 56;
+    for (i, &b) in p.iter().take(7).enumerate() {
+        k |= (b as u64) << (8 * i);
+    }
+    k
+}
+
+fn mc_id() -> u32 {
+    static ID: OnceLock<u32> = OnceLock::new();
+    *ID.get_or_init(|| ns_ids()[MC])
 }
 
 fn ns_ids() -> &'static HashMap<&'static [u8], u32> {
@@ -82,8 +97,10 @@ struct Frame<'a> {
 pub struct Part<'a> {
     reader: Reader<'a>,
     part: &'a str,
-    /// In-scope namespace declarations: (prefix, URI, namespace id).
+    /// In-scope namespace declarations: (prefix, URI, namespace id), and
+    /// each prefix packed (see `key`) for a scan without memcmp.
     bindings: Vec<(&'a [u8], &'a [u8], u32)>,
+    keys: Vec<u64>,
     ignorable: Vec<u32>,
     /// ProcessContent entries: (namespace, local name or "*").
     process: Vec<(u32, &'a [u8])>,
@@ -125,6 +142,7 @@ impl<'a> Part<'a> {
             reader: Reader::new(xml),
             part,
             bindings: vec![(b"xml", XML_NS, ns_ids()[XML_NS])],
+            keys: vec![key(b"xml")],
             ignorable: vec![],
             process: vec![],
             frames: Vec::with_capacity(64),
@@ -143,10 +161,20 @@ impl<'a> Part<'a> {
 
     /// The namespace id a prefix is bound to; an unbound default prefix is "" (id 0).
     fn lookup_id(&self, prefix: &[u8]) -> Option<u32> {
-        match self.bindings.iter().rev().find(|b| b.0 == prefix) {
-            Some(b) => Some(b.2),
-            None => prefix.is_empty().then_some(0),
+        let k = key(prefix);
+        let short = prefix.len() < 8;
+        for i in (0..self.keys.len()).rev() {
+            if self.keys[i] == k && (short || self.bindings[i].0 == prefix) {
+                return Some(self.bindings[i].2);
+            }
         }
+        prefix.is_empty().then_some(0)
+    }
+
+    fn bind(&mut self, prefix: &'a [u8], uri: &'a [u8]) {
+        let id = self.ns_id(uri);
+        self.bindings.push((prefix, uri, id));
+        self.keys.push(key(prefix));
     }
 
     fn ns_id(&mut self, uri: &'a [u8]) -> u32 {
@@ -233,14 +261,12 @@ impl<'a> Part<'a> {
         for i in 0..self.reader.attrs.len() {
             let a = self.reader.attrs[i];
             if a.name == b"xmlns" {
-                let id = self.ns_id(a.value);
-                self.bindings.push((b"", a.value, id));
+                self.bind(b"", a.value);
             } else if let Some(p) = a.name.strip_prefix(b"xmlns:") {
                 if a.value.is_empty() {
                     return fail(format!("Cannot use a prefix with an empty namespace ({}).", String::from_utf8_lossy(p)));
                 }
-                let id = self.ns_id(a.value);
-                self.bindings.push((p, a.value, id));
+                self.bind(p, a.value);
             } else if memchr::memchr(b':', a.name).is_some() {
                 prefixed += 1;
             }
@@ -279,14 +305,21 @@ impl<'a> Part<'a> {
                 }
             }
         }
-        let qname: &'a str = std::str::from_utf8(name).unwrap_or("?");
+        let qname: &'a str = if self.reader.clean {
+            // SAFETY: a clean Reader's buffer is valid UTF-8; names split at ASCII.
+            unsafe { std::str::from_utf8_unchecked(name) }
+        } else {
+            std::str::from_utf8(name).unwrap_or("?")
+        };
 
         // MC attributes this element carries scope its content (and itself).
         let (ig, pc) = (self.ignorable.len(), self.process.len());
         let mut mc_attrs: Vec<(&'a [u8], &'a [u8])> = vec![];
+        let mc = mc_id();
         for a in &self.reader.attrs {
             if let Some(i) = memchr::memchr(b':', a.name)
-                && self.lookup(&a.name[..i]) == Some(MC)
+                && !a.name.starts_with(b"xmlns:")
+                && self.lookup_id(&a.name[..i]) == Some(mc)
             {
                 mc_attrs.push((&a.name[i + 1..], a.value));
             }
@@ -530,6 +563,7 @@ impl<'a> Part<'a> {
         }
         self.text.truncate(f.text_start);
         self.bindings.truncate(f.bindings);
+        self.keys.truncate(f.bindings);
         self.ignorable.truncate(f.ignorable);
         self.process.truncate(f.process);
     }
@@ -635,6 +669,7 @@ impl<'a> Part<'a> {
         let ty = &TYPES[t as usize];
         let (s, n) = ty.attrs;
         let declared = &ATTRS[s as usize..s as usize + n as usize];
+        let clean = self.reader.clean;
         let mut present = std::mem::take(&mut self.present);
         let mut values = std::mem::take(&mut self.values);
         present.clear();
@@ -655,7 +690,7 @@ impl<'a> Part<'a> {
             let aid = names().attr[s as usize + k];
             let value = present.iter_mut().find(|p| p.3 == aid).map(|p| {
                 p.4 = true;
-                unescape(p.2, true)
+                unescape_in(p.2, true, clean)
             });
             self.value(a.validators, a.value, a.enum_id, value.as_deref(), true, qname, a.local);
             values.push(value);
