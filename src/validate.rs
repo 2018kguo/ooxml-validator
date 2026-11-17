@@ -3,6 +3,7 @@
 //! with no tree: a frame per open element, and each composite element's
 //! markup-compatibility-flattened child list, matched when it closes.
 
+use crate::names::names;
 use crate::particle::{self, Kid, Verdict};
 use crate::schema::*;
 use crate::schema_gen::*;
@@ -10,6 +11,7 @@ use crate::semantic::{self, Deferred, Facts, Outcome, Rels, Seen};
 use crate::values;
 use crate::xml::{Event, Reader, unescape};
 use regex::Regex;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -25,6 +27,12 @@ pub struct ValidationError {
     /// The element's qualified name.
     pub node: String,
     pub error_type: &'static str,
+}
+
+/// PROOF_TRACE set: print each element's children and verdict.
+fn trace() -> bool {
+    static T: OnceLock<bool> = OnceLock::new();
+    *T.get_or_init(|| std::env::var_os("PROOF_TRACE").is_some())
 }
 
 fn ns_ids() -> &'static HashMap<&'static [u8], u32> {
@@ -57,8 +65,9 @@ enum Kind {
     Skip,
 }
 
-struct Frame {
+struct Frame<'a> {
     kind: Kind,
+    qname: &'a str,
     ns: u32,
     /// Namespace bindings and MC entries this element pushed.
     bindings: usize,
@@ -68,7 +77,6 @@ struct Frame {
     text_start: usize,
     /// Leaf element already reported for having a child.
     leaf_child: bool,
-    name_start: usize,
 }
 
 pub struct Part<'a> {
@@ -79,10 +87,13 @@ pub struct Part<'a> {
     ignorable: Vec<u32>,
     /// ProcessContent entries: (namespace, local name or "*").
     process: Vec<(u32, &'a [u8])>,
-    frames: Vec<Frame>,
+    frames: Vec<Frame<'a>>,
+    /// Scratch, reused per element: present attributes (namespace id, local,
+    /// value, name id, used) and declared attributes' values.
+    present: Vec<(u32, &'a [u8], &'a [u8], u32, bool)>,
+    values: Vec<Option<Cow<'a, str>>>,
     kids: Vec<Kid>,
     text: String,
-    names: String,
     /// Unknown namespaces get ids past the table.
     dynamic: HashMap<&'a [u8], u32>,
     pub errors: Vec<ValidationError>,
@@ -117,9 +128,10 @@ impl<'a> Part<'a> {
             ignorable: vec![],
             process: vec![],
             frames: Vec::with_capacity(64),
+            present: Vec::with_capacity(16),
+            values: Vec::with_capacity(16),
             kids: Vec::with_capacity(1024),
             text: String::new(),
-            names: String::new(),
             dynamic: HashMap::new(),
             errors: vec![],
         }
@@ -231,7 +243,7 @@ impl<'a> Part<'a> {
             None => (&b""[..], name),
         };
         let ns = self.lookup_id(prefix).unwrap_or(0);
-        let qname = String::from_utf8_lossy(name).into_owned();
+        let qname: &'a str = std::str::from_utf8(name).unwrap_or("?");
 
         // MC attributes this element carries scope its content (and itself).
         let (ig, pc) = (self.ignorable.len(), self.process.len());
@@ -268,7 +280,7 @@ impl<'a> Part<'a> {
             }
         }
 
-        let kind = self.classify(ns, local, &qname, root);
+        let kind = self.classify(ns, local, qname, root);
         // IndexReference counts every element under a given parent.
         if !self.frames.is_empty() && !matches!(kind, Kind::Transparent | Kind::Alternate { .. }) {
             *self.facts.counts.entry(None).or_default() += 1;
@@ -282,18 +294,16 @@ impl<'a> Part<'a> {
         }
         let kids_start = self.kids.len();
         let text_start = self.text.len();
-        let name_start = self.names.len();
-        self.names.push_str(&qname);
         if let Kind::Typed(t) = kind {
             if !mc_attrs.is_empty() {
-                self.mc_attributes(&mc_attrs, &qname);
+                self.mc_attributes(&mc_attrs, qname);
             }
-            self.attributes(t, &qname);
+            self.attributes(t, qname);
         } else if let Kind::Alternate { .. } = kind {
-            self.extended_mc(&qname);
+            self.extended_mc(qname);
             let before = self.errors.len();
             if !mc_attrs.is_empty() {
-                self.mc_attributes(&mc_attrs, &qname);
+                self.mc_attributes(&mc_attrs, qname);
             }
             let raised = self.errors[before..].to_vec();
             self.ac_mc.push(raised);
@@ -307,7 +317,7 @@ impl<'a> Part<'a> {
             kids_start,
             text_start,
             leaf_child: false,
-            name_start,
+            qname,
         });
     }
 
@@ -371,10 +381,9 @@ impl<'a> Part<'a> {
             if t.leaf != 0 {
                 return Kind::Skip;
             }
-            let (cs, cn) = t.children;
-            let named = CHILDREN[cs as usize..cs as usize + cn as usize].iter().any(|c| {
-                c.ns as u32 == ns && c.local.as_bytes() == local && TYPES[c.ty as usize].version <= TARGET_VERSION
-            });
+            let (cs, cn) = (t.children.0 as usize, t.children.1 as usize);
+            let id = names().id(ns, local);
+            let named = (cs..cs + cn).any(|i| names().child[i] == id && TYPES[CHILDREN[i].ty as usize].version <= TARGET_VERSION);
             self.kids.push(Kid { ty: NONE, ns, named });
             return Kind::Skip;
         }
@@ -391,9 +400,11 @@ impl<'a> Part<'a> {
             return Kind::Skip;
         }
         // A strong-typed child: known to its owner's factory.
-        let (cs, cn) = t.children;
-        for c in &CHILDREN[cs as usize..cs as usize + cn as usize] {
-            if c.ns as u32 == ns && c.local.as_bytes() == local {
+        let (cs, cn) = (t.children.0 as usize, t.children.1 as usize);
+        let id = names().id(ns, local);
+        for i in cs..cs + cn {
+            let c = &CHILDREN[i];
+            if names().child[i] == id {
                 if TYPES[c.ty as usize].version <= TARGET_VERSION {
                     self.kids.push(Kid { ty: c.ty, ns, named: false });
                     return Kind::Typed(c.ty);
@@ -429,10 +440,8 @@ impl<'a> Part<'a> {
         any
     }
 
-    fn frame_name(&self, i: usize) -> &str {
-        let start = self.frames[i].name_start;
-        let end = self.frames.get(i + 1).map_or(self.names.len(), |f| f.name_start);
-        &self.names[start..end]
+    fn frame_name(&self, i: usize) -> &'a str {
+        self.frames[i].qname
     }
 
     fn end(&mut self) {
@@ -440,21 +449,21 @@ impl<'a> Part<'a> {
         if let Kind::Alternate { count, .. } = f.kind {
             self.ac_mc.pop();
             if count == 0 {
-                let ac = self.names[f.name_start..].to_string();
-                self.error("Sch_IncompleteContentExpectingComplex", &ac, "AlternateContent shall contain a Choice.".into());
+                self.error("Sch_IncompleteContentExpectingComplex", f.qname, "AlternateContent shall contain a Choice.".into());
             }
         }
         if let Kind::Typed(t) = f.kind {
             let ty = &TYPES[t as usize];
-            let qname = self.names[f.name_start..].to_string();
+            let qname = f.qname;
             if ty.leaf == 2 {
-                let text = self.text[f.text_start..].to_string();
-                self.value(ty.validators, ValueKind::StringValue, NONE, Some(&text), false, &qname, "");
+                let text = std::mem::take(&mut self.text);
+                self.value(ty.validators, ValueKind::StringValue, NONE, Some(&text[f.text_start..]), false, qname, "");
+                self.text = text;
             } else if ty.leaf == 0 {
                 let kids = &self.kids[f.kids_start..];
                 if ty.particle != NONE32 {
                     let verdict = particle::validate(ty.particle, kids, f.ns);
-                    if std::env::var_os("PROOF_TRACE").is_some() {
+                    if trace() {
                         eprintln!("{qname}: {:?} -> {}", kids.iter().map(|k| (k.ty, k.named)).collect::<Vec<_>>(), matches!(verdict, Verdict::Ok));
                     }
                     match verdict {
@@ -483,7 +492,6 @@ impl<'a> Part<'a> {
             self.kids.truncate(f.kids_start);
         }
         self.text.truncate(f.text_start);
-        self.names.truncate(f.name_start);
         self.bindings.truncate(f.bindings);
         self.ignorable.truncate(f.ignorable);
         self.process.truncate(f.process);
@@ -586,38 +594,37 @@ impl<'a> Part<'a> {
     }
 
     /// SchemaTypeValidator.ValidateAttributes.
-    fn attributes(&mut self, t: u16, qname: &str) {
+    fn attributes(&mut self, t: u16, qname: &'a str) {
         let ty = &TYPES[t as usize];
         let (s, n) = ty.attrs;
         let declared = &ATTRS[s as usize..s as usize + n as usize];
-        // Resolve each present attribute once: (namespace id, local, value).
-        let mut present: Vec<(u32, &'a [u8], &'a [u8], bool)> = Vec::with_capacity(self.reader.attrs.len());
-        let attrs: Vec<(&'a [u8], &'a [u8])> = self.reader.attrs.iter().map(|a| (a.name, a.value)).collect();
-        for (name, value) in attrs {
+        let mut present = std::mem::take(&mut self.present);
+        let mut values = std::mem::take(&mut self.values);
+        present.clear();
+        values.clear();
+        for i in 0..self.reader.attrs.len() {
+            let a = self.reader.attrs[i];
+            let name = a.name;
             if name == b"xmlns" || name.starts_with(b"xmlns:") {
                 continue;
             }
             let (ns, local) = match memchr::memchr(b':', name) {
-                Some(i) => {
-                    (self.lookup_id(&name[..i]).unwrap_or(0), &name[i + 1..])
-                }
+                Some(i) => (self.lookup_id(&name[..i]).unwrap_or(0), &name[i + 1..]),
                 None => (0, name),
             };
-            present.push((ns, local, value, false));
+            present.push((ns, local, a.value, names().id(ns, local), false));
         }
-        let mut values: Vec<Option<String>> = Vec::with_capacity(declared.len());
-        for a in declared {
-            let ans = a.ns as u32;
-            let found = present.iter_mut().find(|p| p.0 == ans && p.1 == a.local.as_bytes());
-            let value = found.map(|p| {
-                p.3 = true;
-                unescape(p.2, true).into_owned()
+        for (k, a) in declared.iter().enumerate() {
+            let aid = names().attr[s as usize + k];
+            let value = present.iter_mut().find(|p| p.3 == aid).map(|p| {
+                p.4 = true;
+                unescape(p.2, true)
             });
             self.value(a.validators, a.value, a.enum_id, value.as_deref(), true, qname, a.local);
             values.push(value);
         }
         self.semantics(t, declared, &values, qname);
-        for &(ns, local, _, used) in &present {
+        for &(ns, local, _, _, used) in &present {
             if used {
                 continue;
             }
@@ -628,11 +635,16 @@ impl<'a> Part<'a> {
             let name = String::from_utf8_lossy(local).into_owned();
             self.error("Sch_UndeclaredAttribute", qname, format!("The '{name}' attribute is not declared."));
         }
+        self.present = present;
+        self.values = values;
     }
 
     /// The type's semantic constraints, and the values other parts may refer to.
-    fn semantics(&mut self, t: u16, declared: &'static [Attr], values: &[Option<String>], qname: &str) {
+    fn semantics(&mut self, t: u16, declared: &'static [Attr], values: &[Option<Cow<'a, str>>], qname: &str) {
         let ty = &TYPES[t as usize];
+        if ty.constraints.1 == 0 && !semantic::is_target(ty.ns, ty.local) {
+            return;
+        }
         let seen: Vec<Seen> = declared.iter().zip(values).map(|(attr, v)| Seen { attr, value: v.as_deref() }).collect();
         for &(ens, el, attr) in &semantic::targets().0 {
             if ens == ty.ns && el == ty.local

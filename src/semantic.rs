@@ -7,7 +7,7 @@ use crate::schema::*;
 use crate::schema_gen::*;
 use crate::values;
 use regex::Regex;
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::sync::OnceLock;
 
 /// A part's relationships: id → type (internal and external).
@@ -47,11 +47,16 @@ fn q(a: &Arg) -> Option<(u16, &'static str)> {
 
 /// The (element, attribute) pairs ReferenceExist constraints look up, and the
 /// parents IndexReference constraints count under.
+/// Whether some ReferenceExist constraint reads this element's values.
+pub fn is_target(ns: u16, local: &str) -> bool {
+    targets().0.iter().any(|t| t.0 == ns && t.1 == local)
+}
+
 pub fn targets() -> &'static (HashSet<(u16, &'static str, &'static str)>, HashSet<Option<(u16, &'static str)>>) {
     static T: OnceLock<(HashSet<(u16, &'static str, &'static str)>, HashSet<Option<(u16, &'static str)>>)> = OnceLock::new();
     T.get_or_init(|| {
-        let mut refs = HashSet::new();
-        let mut parents = HashSet::new();
+        let mut refs = HashSet::default();
+        let mut parents = HashSet::default();
         for c in &CONSTRAINTS {
             match c.kind {
                 ConstraintKind::ReferenceExist => {
