@@ -12,7 +12,7 @@ Each round runs both sides alternately in fresh processes, so a noisy moment
 lands on both. Reports medians of wall time and of peak resident memory, and
 writes bench/results.json for bench/chart.py.
 """
-import argparse, json, os, platform, statistics, subprocess, sys, time
+import argparse, json, os, platform, statistics, subprocess, sys, threading, time
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--sdk", required=True)
@@ -27,10 +27,17 @@ args = ap.parse_args()
 def run(cmd, stdin=None):
     t = time.perf_counter()
     p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    if stdin is not None:
-        p.stdin.write(stdin)
-    p.stdin.close()
+
+    def feed():
+        # From a thread: the child's output must drain while its input fills.
+        if stdin is not None:
+            p.stdin.write(stdin)
+        p.stdin.close()
+
+    writer = threading.Thread(target=feed)
+    writer.start()
     out = p.stdout.read()
+    writer.join()
     _, status, usage = os.wait4(p.pid, 0)
     wall = time.perf_counter() - t
     assert os.waitstatus_to_exitcode(status) in (0, 1), cmd

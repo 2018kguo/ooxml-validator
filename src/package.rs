@@ -392,7 +392,7 @@ pub fn validate(files: &Files) -> Outcome {
     for (cls, path, kids) in containers {
         let Some(c) = cls else { continue }; // an extended part has no rules
         let part = path.map_or(String::new(), |p| format!("/{p}"));
-        let mut pkg = |id: &'static str, what: String| structure.push(ValidationError { id, description: what, part: part.clone(), node: String::new(), error_type: "Package" });
+        let mut pkg = |id: &'static str, what: String| structure.push(ValidationError { id, description: what, part: part.clone(), node: String::new(), location: None, error_type: "Package" });
         for (k, _, rel) in kids.iter() {
             if child_class(c, rel).is_none() && k.is_some_and(|k| PARTS[k].version <= TARGET_VERSION) {
                 pkg("Pkg_PartIsNotAllowed", format!("{} cannot hold a part of type {rel}", PARTS[c].name));
@@ -438,7 +438,7 @@ pub fn validate(files: &Files) -> Outcome {
             _ => continue,
         };
         if !ok {
-            errors.push(ValidationError { id, description: format!("{:?} failed for '{}'.", c.kind, d.value), part: format!("/{}", nodes[n].path), node: d.node, error_type: "Semantic" });
+            errors.push(ValidationError { id, description: format!("{:?} failed for '{}'.", c.kind, d.value), part: format!("/{}", nodes[n].path), node: d.node, error_type: "Semantic", location: None });
         }
     }
     Outcome { errors, parsed, malformed, open_error: open_error.or(rels_error) }
@@ -483,7 +483,10 @@ impl Report {
         let n = if max == 0 { self.errors.len() } else { self.errors.len().min(max) };
         let errors: Vec<String> = self.errors[..n]
             .iter()
-            .map(|e| format!("{{\"id\":{},\"description\":{},\"part\":{},\"node\":{},\"errorType\":{}}}", json(e.id), json(&e.description), json(&e.part), json(&e.node), json(e.error_type)))
+            .map(|e| {
+                let at = e.location.map_or(String::new(), |(l, c)| format!(",\"line\":{l},\"column\":{c}"));
+                format!("{{\"id\":{},\"description\":{},\"part\":{},\"node\":{},\"errorType\":{}{at}}}", json(e.id), json(&e.description), json(&e.part), json(&e.node), json(e.error_type))
+            })
             .collect();
         let open = self.open_error.as_deref().map_or("null".to_string(), json);
         format!("{{\"ok\":{},\"openError\":{open},\"errors\":[{}]}}", self.ok(), errors.join(","))
@@ -566,8 +569,9 @@ pub fn check(bytes: &[u8]) -> Report {
         if out.parsed[i] || out.malformed.as_ref().is_some_and(|m| m.0 < i) {
             continue;
         }
-        if let Err(message) = well_formed(xml) {
-            out.malformed = Some((i, ValidationError { id: "xml_parse", description: message, part: format!("/{name}"), node: String::new(), error_type: "Xml" }));
+        if let Err(e) = well_formed(xml) {
+            let location = Some(crate::validate::line_column(xml, e.at));
+            out.malformed = Some((i, ValidationError { id: "xml_parse", description: e.message, part: format!("/{name}"), node: String::new(), location, error_type: "Xml" }));
             break;
         }
     }
@@ -575,7 +579,7 @@ pub fn check(bytes: &[u8]) -> Report {
         && out.malformed.as_ref().is_none_or(|m| i < m.0)
     {
         let part = format!("/{}", files.entries[i].0);
-        out.malformed = Some((i, ValidationError { id: "xml_parse", description: message, part, node: String::new(), error_type: "Xml" }));
+        out.malformed = Some((i, ValidationError { id: "xml_parse", description: message, part, node: String::new(), location: None, error_type: "Xml" }));
     }
     if let Some((_, e)) = out.malformed {
         return Report { open_error: Some(e.description.clone()), errors: vec![e] };
@@ -593,12 +597,12 @@ pub fn check(bytes: &[u8]) -> Report {
 /// What XDocument.Load over an XmlReader accepts: well-formed XML (the
 /// tokenizer's checks), every prefix declared, no attribute twice by
 /// namespace and local name, and xml:space only "default" or "preserve".
-fn well_formed(xml: &[u8]) -> Result<(), String> {
+fn well_formed(xml: &[u8]) -> Result<(), crate::xml::XmlError> {
     let mut r = Reader::new(xml);
     let mut scopes: Vec<(&[u8], &[u8])> = vec![(b"xml", b"http://www.w3.org/XML/1998/namespace"), (b"xmlns", b"http://www.w3.org/2000/xmlns/")];
     let mut marks: Vec<usize> = vec![];
     loop {
-        match r.next().map_err(|e| e.message)? {
+        match r.next()? {
             Event::Eof => return Ok(()),
             Event::Start { name, empty } => {
                 marks.push(scopes.len());
@@ -607,7 +611,7 @@ fn well_formed(xml: &[u8]) -> Result<(), String> {
                         scopes.push((b"", a.value));
                     } else if let Some(p) = a.name.strip_prefix(b"xmlns:") {
                         if a.value.is_empty() {
-                            return Err(format!("Cannot use a prefix with an empty namespace ({}).", String::from_utf8_lossy(p)));
+                            return Err(crate::xml::XmlError { at: r.offset(), message: format!("Cannot use a prefix with an empty namespace ({}).", String::from_utf8_lossy(p)) });
                         }
                         scopes.push((p, a.value));
                     }
@@ -622,19 +626,19 @@ fn well_formed(xml: &[u8]) -> Result<(), String> {
                         }
                     }
                 };
-                resolve(name)?;
+                resolve(name).map_err(|message| crate::xml::XmlError { at: r.offset(), message })?;
                 let mut seen: Vec<(Option<&[u8]>, Vec<u8>)> = vec![];
                 for a in &r.attrs {
                     if a.name == b"xmlns" {
                         continue;
                     }
-                    let key = resolve(a.name)?;
+                    let key = resolve(a.name).map_err(|message| crate::xml::XmlError { at: r.offset(), message })?;
                     if seen.contains(&key) {
-                        return Err(format!("'{}' is a duplicate attribute name.", String::from_utf8_lossy(a.name)));
+                        return Err(crate::xml::XmlError { at: r.offset(), message: format!("'{}' is a duplicate attribute name.", String::from_utf8_lossy(a.name)) });
                     }
                     seen.push(key);
                     if a.name == b"xml:space" && a.value != b"default" && a.value != b"preserve" {
-                        return Err(format!("'{}' is an invalid xml:space value.", String::from_utf8_lossy(a.value)));
+                        return Err(crate::xml::XmlError { at: r.offset(), message: format!("'{}' is an invalid xml:space value.", String::from_utf8_lossy(a.value)) });
                     }
                 }
                 if empty {

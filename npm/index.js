@@ -24,5 +24,8 @@ export async function validate(docx, { maxErrors = 1000 } = {}) {
   const len = Number(packed & 0xffffffffn);
   const json = new TextDecoder().decode(new Uint8Array(memory.buffer, ptr, len));
   dealloc(ptr, len);
+  // WebAssembly memory only grows: after a huge document, start the next
+  // call with a fresh instance rather than keep the peak for good.
+  if (memory.buffer.byteLength > 256 * 1024 * 1024) instance = undefined;
   return JSON.parse(json);
 }

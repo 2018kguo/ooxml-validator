@@ -8,6 +8,9 @@ export interface ValidationError {
   node: string;
   /** "Schema", "Semantic", "Package", "MarkupCompatibility" or "Xml". */
   errorType: string;
+  /** For XML that isn't well formed: where, counting from 1. */
+  line?: number;
+  column?: number;
 }
 
 export interface Report {

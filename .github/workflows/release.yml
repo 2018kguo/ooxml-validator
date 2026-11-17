@@ -1,0 +1,52 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (build and pack only, no publish)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  # npm trusted publishing: GitHub's OIDC token replaces an NPM_TOKEN secret.
+  id-token: write
+
+concurrency:
+  group: release-publish
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - run: cargo test --release --workspace
+      # Nothing ships unless it agrees with the pinned SDK.
+      - run: WORK=$RUNNER_TEMP/agree fuzz/agree.sh
+      - run: scripts/build-npm.sh && node npm/same.mjs target/release/ooxml-validator $RUNNER_TEMP/agree/docs/all.txt
+      - name: Pack
+        if: inputs.dry_run
+        run: |
+          (cd npm && npm pack --dry-run)
+          cargo package --allow-dirty --no-verify
+      - name: Publish @2018kguo/ooxml-validator
+        if: ${{ !inputs.dry_run }}
+        working-directory: npm
+        run: npm publish --provenance --access public
+      - name: Publish the crate
+        if: ${{ !inputs.dry_run }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish

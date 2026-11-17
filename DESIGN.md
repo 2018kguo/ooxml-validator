@@ -1,4 +1,4 @@
-# ooxml-validator: a streaming OOXML validator
+# How ooxml-validator works
 
 Goal: give the same verdict as Microsoft's Open XML SDK validator
 (`OpenXmlValidator(FileFormatVersions.Microsoft365)`, DocumentFormat.OpenXml
@@ -6,10 +6,10 @@ Goal: give the same verdict as Microsoft's Open XML SDK validator
 
 ## Why
 
-On a 166-page document (6.9 MB `document.xml`) the SDK takes ~1.1 s inside
-`Validate`: 38% building its DOM, 34% attribute checks (each union member that
-fails builds a localized error string, then discards it). ooxml-validator gives the same
-verdict for the whole package in 0.2 s and 19 MB (the SDK: ~1.9 s, 190 MB).
+Profiled on a 166-page document (6.9 MB `document.xml`), the SDK spends 38% of
+`Validate` building its DOM and 34% checking attributes: each union member that
+fails builds a localized error string, then discards it. ooxml-validator reads
+each part once as a token stream and never builds a tree.
 
 ## Shape
 
@@ -89,3 +89,50 @@ Children (CompositeParticleValidator and friends):
   validated with the type-level validators (isAttribute false: Sch_Element...).
 - Traversal (ValidatingTraverse): strong-typed elements are validated; unknown
   elements are not, and their children only under ProcessContent.
+
+## Loading the package (what the SDK throws before validating)
+
+Any of these makes the SDK fail to open the document, and ooxml-validator
+reports an open error instead of a list of errors:
+- XmlReader (the wrapper's prepass, every .xml/.rels entry): not well formed,
+  an undeclared prefix, an attribute twice by namespace and name, an
+  `xml:space` other than default/preserve, an encoding .NET lacks. Parts are
+  decoded as XmlReader decodes them: byte order mark, first bytes, declaration.
+- System.IO.Packaging: a .rels without a `Relationships` root, with another
+  element, or a relationship without Id/Type/Target, a non-NCName or repeated
+  Id, a TargetMode other than Internal/External; `[Content_Types].xml`
+  declaring a Default or Override twice. Overrides match part names with case;
+  parts are found without case, percent-decoded.
+- LoadReferencedPartsAndRelationships: an internal target that doesn't exist
+  (hyperlinks and "NULL" targets load nothing; media, audio and video must
+  exist); a part with a fixed content type and another one declared; one part
+  reached by two relationship types; a part root that isn't the class's root.
+
+## Strict documents
+
+A Strict relationship type anywhere the package loads makes it Strict: then
+namespaces (and attribute values naming them) read as Transitional, and nine
+Word classes rewrite attributes (`src/strict.rs`). Without one, the extended
+Word namespaces (`.../2006/3/main` and the like) read as Transitional instead.
+gen stops if the SDK's set of translating classes changes.
+
+## Staying in agreement
+
+`fuzz/agree.sh VERSION` clones the SDK at that tag, regenerates the tables,
+builds the oracle against that NuGet release, and diffs every verdict on the
+SDK's own test documents, mutants of them, `fuzz/cases.py`'s problem
+documents and a generated report. CI runs it on every push against
+`SDK_VERSION`; weekly it fuzzes with a fresh seed and tries the newest release,
+opening a pull request when it agrees and an issue when it doesn't.
+
+## Speed
+
+What made the difference, in order of effect (each kept only if paired A/B
+runs showed it, and only with every document still agreeing):
+- No allocation per element or attribute: values are borrowed slices,
+  unescaped only when they contain `&`; scratch vectors are reused.
+- Namespace ids resolved once, when a prefix is declared; prefixes compared as
+  packed integers; element and attribute names interned to ids.
+- Each zip entry inflated once (zlib-rs), parts validated on up to four
+  threads, largest first.
+- The UTF-8 and control-character check done once per part, not per token.

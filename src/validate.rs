@@ -28,6 +28,17 @@ pub struct ValidationError {
     /// The element's qualified name.
     pub node: String,
     pub error_type: &'static str,
+    /// Where an XML parse error is: (line, column), both from 1.
+    pub location: Option<(u32, u32)>,
+}
+
+/// The (line, column) of a byte offset, as XmlReader counts them (from 1).
+pub fn line_column(xml: &[u8], at: usize) -> (u32, u32) {
+    let before = &xml[..at.min(xml.len())];
+    let line_start = memchr::memrchr(b'\n', before).map_or(0, |i| i + 1);
+    let line = memchr::memchr_iter(b'\n', before).count() + 1;
+    let column = String::from_utf8_lossy(&before[line_start..]).chars().count() + 1;
+    (line as u32, column as u32)
 }
 
 /// OOXML_VALIDATOR_TRACE set: print each element's children and verdict.
@@ -113,6 +124,8 @@ pub struct Part<'a> {
     strict: bool,
     values: Vec<Option<Cow<'a, str>>>,
     kids: Vec<Kid>,
+    /// Each kid's qualified name, for messages.
+    kid_names: Vec<&'a str>,
     text: String,
     /// Unknown namespaces get ids past the table.
     dynamic: HashMap<&'a [u8], u32>,
@@ -153,6 +166,7 @@ impl<'a> Part<'a> {
             present: Vec::with_capacity(16),
             values: Vec::with_capacity(16),
             kids: Vec::with_capacity(1024),
+            kid_names: Vec::with_capacity(1024),
             text: String::new(),
             dynamic: HashMap::new(),
             errors: vec![],
@@ -195,7 +209,7 @@ impl<'a> Part<'a> {
     }
 
     fn error_typed(&mut self, id: &'static str, node: &str, description: String, error_type: &'static str) {
-        self.errors.push(ValidationError { id, description, part: self.part.to_string(), node: node.to_string(), error_type });
+        self.errors.push(ValidationError { id, description, part: self.part.to_string(), node: node.to_string(), error_type, location: None });
     }
 
     /// The nearest typed frame, through transparent ones.
@@ -261,7 +275,8 @@ impl<'a> Part<'a> {
     fn start(&mut self, name: &'a [u8], root: u16) -> Result<(), XmlError> {
         // Namespace declarations first: they scope this element's own name.
         let mark = self.bindings.len();
-        let fail = |m: String| Err(XmlError { at: 0, message: m });
+        let at = self.reader.offset();
+        let fail = |m: String| Err(XmlError { at, message: m });
         let mut prefixed = 0;
         for i in 0..self.reader.attrs.len() {
             let a = self.reader.attrs[i];
@@ -397,7 +412,7 @@ impl<'a> Part<'a> {
     }
 
     /// Decides what an element is, and records it as its owner's child.
-    fn classify(&mut self, ns: u32, local: &'a [u8], qname: &str, root: u16) -> Kind {
+    fn classify(&mut self, ns: u32, local: &'a [u8], qname: &'a str, root: u16) -> Kind {
         let Some(parent) = self.frames.last() else {
             let t = &TYPES[root as usize];
             if t.ns as u32 == ns && t.local.as_bytes() == local {
@@ -461,6 +476,7 @@ impl<'a> Part<'a> {
             let id = names().id(ns, local);
             let named = (cs..cs + cn).any(|i| names().child[i] == id && TYPES[CHILDREN[i].ty as usize].version <= TARGET_VERSION);
             self.kids.push(Kid { ty: NONE, ns, named });
+            self.kid_names.push(qname);
             return Kind::Skip;
         }
         let Some((owner, owner_ty)) = self.owner() else { return Kind::Skip };
@@ -483,6 +499,7 @@ impl<'a> Part<'a> {
             if names().child[i] == id {
                 if TYPES[c.ty as usize].version <= TARGET_VERSION {
                     self.kids.push(Kid { ty: c.ty, ns, named: false });
+                    self.kid_names.push(qname);
                     return Kind::Typed(c.ty);
                 }
             }
@@ -496,6 +513,7 @@ impl<'a> Part<'a> {
         // An unknown element: a child that matches no particle; not validated.
         let _ = owner_ns;
         self.kids.push(Kid { ty: NONE, ns, named: false });
+        self.kid_names.push(qname);
         Kind::Skip
     }
 
@@ -553,9 +571,18 @@ impl<'a> Part<'a> {
                             } else {
                                 "Sch_InvalidElementContentExpectingComplex"
                             };
-                            self.error(id, &qname, format!("The element '{qname}' has an out-of-place child element ({id})."));
+                            let kid = self.kid_names[f.kids_start + i];
+                            let what = match id {
+                                "Sch_UnexpectedElementContentExpectingComplex" => format!("has unexpected child element '{kid}'"),
+                                "Sch_InvalidElementContentWrongType" => format!("has child element '{kid}' of invalid type"),
+                                _ => format!("has invalid child element '{kid}'"),
+                            };
+                            self.error(id, qname, format!("The element '{qname}' {what}."));
                         }
-                        Verdict::Repeated(_) => self.error("Sch_AllElement", &qname, format!("The element '{qname}' has a repeated child element.")),
+                        Verdict::Repeated(i) => {
+                            let kid = self.kid_names[f.kids_start + i];
+                            self.error("Sch_AllElement", qname, format!("The element '{qname}' has child element '{kid}' more than once."));
+                        }
                     }
                 } else if !kids.is_empty() {
                     self.error("Sch_InvalidChildinLeafElement", &qname, format!("The element '{qname}' cannot contain children."));
@@ -566,6 +593,7 @@ impl<'a> Part<'a> {
         // wrapper added them to its owner's.
         if let Kind::Typed(_) = f.kind {
             self.kids.truncate(f.kids_start);
+            self.kid_names.truncate(f.kids_start);
         }
         self.text.truncate(f.text_start);
         self.bindings.truncate(f.bindings);
@@ -590,7 +618,7 @@ impl<'a> Part<'a> {
             })
             .collect();
         for id in bad {
-            self.errors.push(ValidationError { id, description: format!("'{qname}' carries an attribute markup compatibility does not allow."), part: self.part.to_string(), node: qname.to_string(), error_type: "MarkupCompatibility" });
+            self.errors.push(ValidationError { id, description: format!("'{qname}' carries an attribute markup compatibility does not allow."), part: self.part.to_string(), node: qname.to_string(), error_type: "MarkupCompatibility", location: None });
         }
     }
 
@@ -599,7 +627,7 @@ impl<'a> Part<'a> {
     fn acb(&mut self, qname: &str, choice: bool) {
         // Requires is declared on Choice only.
         if !choice && self.reader.attrs.iter().any(|a| a.name == b"Requires") {
-            self.errors.push(ValidationError { id: "MC_ErrorOnUnprefixedAttributeName", description: "Fallback cannot carry Requires.".into(), part: self.part.to_string(), node: qname.to_string(), error_type: "MarkupCompatibility" });
+            self.errors.push(ValidationError { id: "MC_ErrorOnUnprefixedAttributeName", description: "Fallback cannot carry Requires.".into(), part: self.part.to_string(), node: qname.to_string(), location: None, error_type: "MarkupCompatibility" });
         }
         self.extended_mc(qname);
         if let Some(again) = self.ac_mc.last().cloned() {
@@ -667,7 +695,7 @@ impl<'a> Part<'a> {
 
     fn mc_error(&mut self, id: &'static str, node: &str, value: &[u8]) {
         let value = String::from_utf8_lossy(value);
-        self.errors.push(ValidationError { id, description: format!("The markup compatibility attribute value '{value}' is invalid."), part: self.part.to_string(), node: node.to_string(), error_type: "MarkupCompatibility" });
+        self.errors.push(ValidationError { id, description: format!("The markup compatibility attribute value '{value}' is invalid."), part: self.part.to_string(), node: node.to_string(), error_type: "MarkupCompatibility", location: None });
     }
 
     /// SchemaTypeValidator.ValidateAttributes.
@@ -789,9 +817,15 @@ impl<'a> Part<'a> {
             error = default_check(kind, enum_id, value, data_type).map(|id| (id, 1));
         }
         if let Some((id, n)) = error {
-            let what = if attribute { format!("attribute '{local}'") } else { "text".to_string() };
+            let v = value.unwrap_or("");
+            let message = match id {
+                "Sch_MissRequiredAttribute" => format!("The required attribute '{local}' is missing."),
+                "Sch_AttributeUnionFailedEx" => format!("The '{local}' attribute is invalid: the value '{v}' is not valid according to any of the member types of the union."),
+                _ if attribute => format!("The attribute '{local}' has invalid value '{v}'."),
+                _ => format!("The element '{qname}' has invalid text '{v}'."),
+            };
             for _ in 0..n {
-                self.error(id, qname, format!("The {what} of '{qname}' has an invalid value '{}'.", value.unwrap_or("")));
+                self.error(id, qname, message.clone());
             }
         }
     }
@@ -924,7 +958,7 @@ pub fn validate_part(xml: &[u8], part: &str, root: u16, rels: &Rels, strict: boo
     match Part::new(xml, part, rels, strict).run(root) {
         Ok(r) => r,
         Err(e) => PartResult {
-            errors: vec![ValidationError { id: "xml_parse", description: e.message, part: part.to_string(), node: String::new(), error_type: "Xml" }],
+            errors: vec![ValidationError { id: "xml_parse", description: e.message, part: part.to_string(), node: String::new(), location: Some(line_column(xml, e.at)), error_type: "Xml" }],
             facts: Facts::default(),
             deferred: vec![],
         },
