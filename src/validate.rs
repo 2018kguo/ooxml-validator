@@ -9,7 +9,7 @@ use crate::schema::*;
 use crate::schema_gen::*;
 use crate::semantic::{self, Deferred, Facts, Outcome, Rels, Seen};
 use crate::values;
-use crate::xml::{Event, Reader, unescape};
+use crate::xml::{Event, Reader, XmlError, unescape};
 use regex::Regex;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -215,7 +215,7 @@ impl<'a> Part<'a> {
                     }
                 }
                 Event::Start { name, empty } => {
-                    self.start(name, root);
+                    self.start(name, root)?;
                     if empty {
                         self.end();
                     }
@@ -225,24 +225,60 @@ impl<'a> Part<'a> {
         }
     }
 
-    fn start(&mut self, name: &'a [u8], root: u16) {
+    fn start(&mut self, name: &'a [u8], root: u16) -> Result<(), XmlError> {
         // Namespace declarations first: they scope this element's own name.
         let mark = self.bindings.len();
+        let fail = |m: String| Err(XmlError { at: 0, message: m });
+        let mut prefixed = 0;
         for i in 0..self.reader.attrs.len() {
             let a = self.reader.attrs[i];
             if a.name == b"xmlns" {
                 let id = self.ns_id(a.value);
                 self.bindings.push((b"", a.value, id));
             } else if let Some(p) = a.name.strip_prefix(b"xmlns:") {
+                if a.value.is_empty() {
+                    return fail(format!("Cannot use a prefix with an empty namespace ({}).", String::from_utf8_lossy(p)));
+                }
                 let id = self.ns_id(a.value);
                 self.bindings.push((p, a.value, id));
+            } else if memchr::memchr(b':', a.name).is_some() {
+                prefixed += 1;
             }
         }
         let (prefix, local) = match memchr::memchr(b':', name) {
             Some(i) => (&name[..i], &name[i + 1..]),
             None => (&b""[..], name),
         };
-        let ns = self.lookup_id(prefix).unwrap_or(0);
+        // What XmlReader enforces before the SDK sees the part: declared
+        // prefixes, xml:space values, no attribute twice by namespace and name.
+        let Some(ns) = self.lookup_id(prefix) else {
+            return fail(format!("'{}' is an undeclared prefix.", String::from_utf8_lossy(prefix)));
+        };
+        if prefixed > 0 {
+            let attrs = &self.reader.attrs;
+            for (i, a) in attrs.iter().enumerate() {
+                let Some(c) = memchr::memchr(b':', a.name) else { continue };
+                if a.name.starts_with(b"xmlns:") {
+                    continue;
+                }
+                let Some(id) = self.lookup_id(&a.name[..c]) else {
+                    return fail(format!("'{}' is an undeclared prefix.", String::from_utf8_lossy(&a.name[..c])));
+                };
+                if a.name == b"xml:space" && a.value != b"default" && a.value != b"preserve" {
+                    return fail(format!("'{}' is an invalid xml:space value.", String::from_utf8_lossy(a.value)));
+                }
+                if prefixed > 1 || attrs.len() > 1 {
+                    let local = &a.name[c + 1..];
+                    let clash = attrs[..i].iter().any(|b| {
+                        let (bp, bl) = memchr::memchr(b':', b.name).map_or((&b""[..], b.name), |j| (&b.name[..j], &b.name[j + 1..]));
+                        bl == local && !b.name.starts_with(b"xmlns") && if bp.is_empty() { id == 0 } else { self.lookup_id(bp) == Some(id) }
+                    });
+                    if clash {
+                        return fail(format!("'{}' is a duplicate attribute name.", String::from_utf8_lossy(a.name)));
+                    }
+                }
+            }
+        }
         let qname: &'a str = std::str::from_utf8(name).unwrap_or("?");
 
         // MC attributes this element carries scope its content (and itself).
@@ -319,6 +355,7 @@ impl<'a> Part<'a> {
             leaf_child: false,
             qname,
         });
+        Ok(())
     }
 
     /// Decides what an element is, and records it as its owner's child.

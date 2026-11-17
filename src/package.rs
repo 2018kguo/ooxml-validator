@@ -9,7 +9,7 @@ use crate::semantic::{Facts, Rels};
 use crate::validate::{ValidationError, validate_part};
 use crate::xml::{Event, Reader};
 use std::collections::{HashMap, VecDeque};
-use std::io::{Read, Seek};
+use std::io::Read;
 use std::sync::OnceLock;
 
 const PACKAGE: &str = "WordprocessingDocument";
@@ -151,23 +151,45 @@ fn referenced(nodes: &[Node], package: &[(Option<usize>, usize, String)], curren
     found
 }
 
-/// Validates every reachable part of a package.
-pub fn validate<R: Read + Seek>(zip: &mut zip::ZipArchive<R>) -> Vec<ValidationError> {
-    let mut read = |name: &str| -> Option<Vec<u8>> {
-        let mut f = zip.by_name(name).ok()?;
-        let mut v = Vec::with_capacity(f.size() as usize);
-        f.read_to_end(&mut v).ok()?;
-        Some(v)
-    };
+/// A package's XML entries (.xml and .rels), each inflated once, in zip order.
+pub struct Files {
+    pub entries: Vec<(String, Vec<u8>)>,
+    index: HashMap<String, usize>,
+}
+
+impl Files {
+    pub fn new(entries: Vec<(String, Vec<u8>)>) -> Files {
+        let index = entries.iter().enumerate().map(|(i, e)| (e.0.clone(), i)).collect();
+        Files { entries, index }
+    }
+
+    fn get(&self, name: &str) -> Option<(usize, &[u8])> {
+        self.index.get(name).map(|&i| (i, &self.entries[i].1[..]))
+    }
+}
+
+/// What validating a package found.
+pub struct Outcome {
+    pub errors: Vec<ValidationError>,
+    /// Entries validated as parts (their well-formedness is checked there).
+    pub parsed: Vec<bool>,
+    /// The first part, in zip order, that is not well-formed XML.
+    pub malformed: Option<(usize, ValidationError)>,
+}
+
+/// Validates every reachable part of a package: discovers the part tree from
+/// the relationship parts, validates the parts in parallel, then checks the
+/// package's structure and the constraints that span parts.
+pub fn validate(files: &Files) -> Outcome {
     let package = class(PACKAGE).expect("package class");
-    let mut errors = vec![];
     let mut nodes: Vec<Node> = vec![];
     let mut index: HashMap<String, usize> = HashMap::new();
     let mut top: Vec<(Option<usize>, usize, String)> = vec![];
-    let mut deferred = vec![];
+    let mut rels_of: Vec<Rels> = vec![];
+    let read_rels = |path: &str| files.get(path).map(|(_, x)| relationships(x)).unwrap_or_default();
     // (path, class, parent node, relationship type)
     let mut queue: VecDeque<(String, Option<usize>, Option<usize>, String)> = VecDeque::new();
-    for (_, t, target, external) in read("_rels/.rels").map(|x| relationships(&x)).unwrap_or_default() {
+    for (_, t, target, external) in read_rels("_rels/.rels") {
         if !external {
             queue.push_back((resolve("", &target), child_class(package, &t).or_else(|| global_class(&t)), None, t));
         }
@@ -178,6 +200,7 @@ pub fn validate<R: Read + Seek>(zip: &mut zip::ZipArchive<R>) -> Vec<ValidationE
             None => {
                 let n = nodes.len();
                 nodes.push(Node { path: path.clone(), class: cls, parent, children: vec![], facts: Facts::default(), has_root: false });
+                rels_of.push(Rels::default());
                 index.insert(path.clone(), n);
                 n
             }
@@ -196,18 +219,8 @@ pub fn validate<R: Read + Seek>(zip: &mut zip::ZipArchive<R>) -> Vec<ValidationE
         if cls.is_some_and(|c| PARTS[c].version > TARGET_VERSION) {
             continue;
         }
-        let rels = read(&rels_path(&path)).map(|x| relationships(&x)).unwrap_or_default();
-        let types = Rels { types: rels.iter().map(|(id, t, _, _)| (id.clone(), t.clone())).collect() };
-        if let Some(c) = cls
-            && PARTS[c].root != NONE
-            && let Some(xml) = read(&path)
-        {
-            let r = validate_part(&xml, &format!("/{path}"), PARTS[c].root, &types);
-            errors.extend(r.errors);
-            nodes[n].facts = r.facts;
-            nodes[n].has_root = true;
-            deferred.extend(r.deferred.into_iter().map(|d| (n, d)));
-        }
+        let rels = read_rels(&rels_path(&path));
+        rels_of[n] = Rels { types: rels.iter().map(|(id, t, _, _)| (id.clone(), t.clone())).collect() };
         for (_, t, target, external) in rels {
             if !external {
                 let child = cls.and_then(|c| child_class(c, &t)).or_else(|| global_class(&t));
@@ -215,6 +228,57 @@ pub fn validate<R: Read + Seek>(zip: &mut zip::ZipArchive<R>) -> Vec<ValidationE
             }
         }
     }
+
+    // The parts to validate, largest first, over a few threads.
+    let mut jobs: Vec<(usize, usize, &[u8], u16)> = nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(n, node)| {
+            let c = node.class.filter(|&c| PARTS[c].version <= TARGET_VERSION && PARTS[c].root != NONE)?;
+            let (entry, xml) = files.get(&node.path)?;
+            Some((n, entry, xml, PARTS[c].root))
+        })
+        .collect();
+    jobs.sort_by_key(|j| std::cmp::Reverse(j.2.len()));
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(jobs.len()).min(4).max(1);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut results: Vec<Option<crate::validate::PartResult>> = (0..nodes.len()).map(|_| None).collect();
+    std::thread::scope(|scope| {
+        let work = || {
+            let mut out = vec![];
+            loop {
+                let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(&(n, _, xml, root)) = jobs.get(k) else { break };
+                out.push((n, validate_part(xml, &format!("/{}", nodes[n].path), root, &rels_of[n])));
+            }
+            out
+        };
+        let handles: Vec<_> = (1..threads).map(|_| scope.spawn(work)).collect();
+        for (n, r) in work().into_iter().chain(handles.into_iter().flat_map(|h| h.join().expect("validator thread"))) {
+            results[n] = Some(r);
+        }
+    });
+
+    let mut parsed = vec![false; files.entries.len()];
+    let mut malformed: Option<(usize, ValidationError)> = None;
+    let mut errors = vec![];
+    let mut deferred = vec![];
+    // In discovery order, as the SDK reports parts.
+    for (n, r) in results.into_iter().enumerate() {
+        let Some(r) = r else { continue };
+        let entry = files.get(&nodes[n].path).map(|e| e.0).unwrap_or(usize::MAX);
+        parsed[entry] = true;
+        if let Some(e) = r.errors.iter().find(|e| e.id == "xml_parse")
+            && malformed.as_ref().is_none_or(|m| entry < m.0)
+        {
+            malformed = Some((entry, e.clone()));
+        }
+        errors.extend(r.errors);
+        nodes[n].facts = r.facts;
+        nodes[n].has_root = true;
+        deferred.extend(r.deferred.into_iter().map(|d| (n, d)));
+    }
+
     // Package structure (PackageValidator), reported before the parts.
     let mut structure = vec![];
     let containers = std::iter::once((Some(package), None, &top)).chain(nodes.iter().map(|n| (n.class, Some(n.path.as_str()), &n.children)));
@@ -270,7 +334,7 @@ pub fn validate<R: Read + Seek>(zip: &mut zip::ZipArchive<R>) -> Vec<ValidationE
             errors.push(ValidationError { id, description: format!("{:?} failed for '{}'.", c.kind, d.value), part: format!("/{}", nodes[n].path), node: d.node, error_type: "Semantic" });
         }
     }
-    errors
+    Outcome { errors, parsed, malformed }
 }
 
 /// The verdict on one .docx: a package that cannot be read is not OK.
@@ -285,9 +349,10 @@ impl Report {
     }
 }
 
-/// Validates a .docx as bytes: package limits, every XML part well formed
-/// (reachable or not; the first failure is the verdict), then every reachable
-/// part against the schema and its semantic constraints.
+/// Validates a .docx as bytes: package limits; every XML entry well formed
+/// (reachable or not; the first failure in zip order is the verdict, as the
+/// SDK wrapper's prepass has it); every reachable part against the schema and
+/// its semantic constraints. Each entry is inflated once.
 pub fn check(bytes: &[u8]) -> Report {
     let fail = |e: String| Report { open_error: Some(e), errors: vec![] };
     if bytes.len() > 100 << 20 {
@@ -301,9 +366,10 @@ pub fn check(bytes: &[u8]) -> Report {
         return fail("DOCX exceeds the 10000-part validation limit.".into());
     }
     let mut names = std::collections::HashSet::new();
-    let mut xml_bytes = 0u64;
+    let mut budget: u64 = 128 << 20;
+    let mut entries = vec![];
     for i in 0..zip.len() {
-        let Ok(mut f) = zip.by_index(i) else { return fail("unreadable entry".into()) };
+        let Ok(f) = zip.by_index(i) else { return fail("unreadable entry".into()) };
         let name = f.name().to_string();
         if !names.insert(name.to_lowercase()) {
             return fail("DOCX contains ambiguous duplicate ZIP part names.".into());
@@ -312,23 +378,34 @@ pub fn check(bytes: &[u8]) -> Report {
         if !lower.ends_with(".xml") && !lower.ends_with(".rels") {
             continue;
         }
-        xml_bytes += f.size();
-        if xml_bytes > 128 << 20 {
+        if f.size() > budget {
             return fail("DOCX XML exceeds the 128 MB validation limit.".into());
         }
+        budget -= f.size();
+        // Exactly the declared size, read in one go; never more than the budget.
         let mut xml = Vec::with_capacity(f.size() as usize);
-        if let Err(e) = f.read_to_end(&mut xml) {
+        if let Err(e) = f.take(budget + 1).read_to_end(&mut xml) {
             return fail(e.to_string());
         }
-        if let Err(message) = well_formed(&xml) {
-            return Report {
-                open_error: Some(message.clone()),
-                errors: vec![ValidationError { id: "xml_parse", description: message, part: format!("/{name}"), node: String::new(), error_type: "Xml" }],
-            };
+        entries.push((name, xml));
+    }
+    let files = Files::new(entries);
+    let mut out = validate(&files);
+    // Entries no part validation read are checked as XML alone.
+    for (i, (name, xml)) in files.entries.iter().enumerate() {
+        if out.parsed[i] || out.malformed.as_ref().is_some_and(|m| m.0 < i) {
+            continue;
+        }
+        if let Err(message) = well_formed(xml) {
+            out.malformed = Some((i, ValidationError { id: "xml_parse", description: message, part: format!("/{name}"), node: String::new(), error_type: "Xml" }));
+            break;
         }
     }
+    if let Some((_, e)) = out.malformed {
+        return Report { open_error: Some(e.description.clone()), errors: vec![e] };
+    }
     // Every error: a caller matching the SDK wrapper keeps the first 50.
-    Report { open_error: None, errors: validate(&mut zip) }
+    Report { open_error: None, errors: out.errors }
 }
 
 /// What XDocument.Load over an XmlReader accepts: well-formed XML (the
