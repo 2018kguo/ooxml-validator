@@ -5,11 +5,42 @@
   "license": "MIT",
   "type": "module",
   "exports": {
-    ".": { "types": "./index.d.ts", "default": "./index.js" }
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./worker": {
+      "types": "./worker.d.ts",
+      "default": "./worker.js"
+    }
   },
-  "bin": { "ooxml-validator": "./cli.js" },
-  "files": ["index.js", "index.d.ts", "cli.js", "ooxml_validator.wasm", "README.md", "LICENSE", "NOTICE"],
-  "engines": { "node": ">=20" },
-  "repository": { "type": "git", "url": "git+https://github.com/2018kguo/ooxml-validator.git" },
-  "keywords": ["docx", "ooxml", "openxml", "word", "validator", "wasm"]
+  "bin": {
+    "ooxml-validator": "./cli.js"
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "worker.js",
+    "worker.d.ts",
+    "cli.js",
+    "ooxml_validator.wasm",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/2018kguo/ooxml-validator.git"
+  },
+  "keywords": [
+    "docx",
+    "ooxml",
+    "openxml",
+    "word",
+    "validator",
+    "wasm"
+  ]
 }
