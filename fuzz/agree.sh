@@ -2,8 +2,8 @@
 # agree.sh [VERSION]: checks ooxml-validator against Microsoft's Open XML SDK
 # at VERSION (default: SDK_VERSION). Clones the SDK at that tag, regenerates
 # the schema tables from it, builds the SDK oracle against that NuGet release,
-# and diffs every verdict on the SDK's own test documents, mutants of them and
-# a generated report. Exits 1 on any disagreement or on table drift.
+# and diffs every verdict on the SDK's own test documents, mutants of them,
+# fuzz/cases.py's problem documents and a generated report. Exits 1 on any disagreement or on table drift.
 set -eu
 cd "$(dirname "$0")/.."
 version=${1:-$(cat SDK_VERSION)}
@@ -20,7 +20,8 @@ mkdir -p "$docs"
 find "$sdk/test" -name '*.docx' > "$docs/sdk.txt"
 python3 fuzz/mutate.py "$docs/sdk.txt" "$docs/mutants" "${MUTANTS:-600}" "${SEED:-1}" > /dev/null
 python3 bench/generate.py "$docs/report.docx" 40 > /dev/null
-cat "$docs/sdk.txt" "$docs/mutants/list.txt" > "$docs/all.txt"
+python3 fuzz/cases.py "$docs/cases" > /dev/null
+cat "$docs/sdk.txt" "$docs/mutants/list.txt" "$docs/cases/list.txt" > "$docs/all.txt"
 echo "$docs/report.docx" >> "$docs/all.txt"
 echo "SDK $version: $(wc -l < "$docs/all.txt" | tr -d ' ') documents"
 

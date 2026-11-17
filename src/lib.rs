@@ -10,6 +10,7 @@
 pub use package::{Report, check};
 pub use validate::ValidationError;
 
+pub mod encoding;
 pub mod names;
 pub mod package;
 pub mod strict;

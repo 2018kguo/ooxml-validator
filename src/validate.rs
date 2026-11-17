@@ -895,7 +895,7 @@ fn name_char(c: char) -> bool {
     name_start(c) || c.is_ascii_digit() || matches!(c, '-' | '.' | '\u{B7}') || matches!(c as u32, 0x300..=0x36F | 0x203F..=0x2040)
 }
 
-fn ncname(s: &str) -> bool {
+pub(crate) fn ncname(s: &str) -> bool {
     let mut cs = s.chars();
     cs.next().is_some_and(name_start) && cs.all(name_char)
 }

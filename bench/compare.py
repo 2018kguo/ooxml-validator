@@ -17,6 +17,7 @@ import argparse, json, os, platform, statistics, subprocess, sys, time
 ap = argparse.ArgumentParser()
 ap.add_argument("--sdk", required=True)
 ap.add_argument("--ours", required=True)
+ap.add_argument("--wasm", help="the npm package's CLI, e.g. 'node npm/cli.js'")
 ap.add_argument("--rounds", type=int, default=7)
 ap.add_argument("--large", nargs="*", default=[])
 ap.add_argument("--corpus")
@@ -45,10 +46,15 @@ def ours(paths):
     return run([args.ours, "--json", *paths])
 
 
+def wasm(paths):
+    return run([*args.wasm.split(), "--json", *paths])
+
+
 def measure(name, paths):
-    rows = {"sdk": [], "ours": []}
+    sides = (("sdk", sdk), ("ours", ours)) + ((("wasm", wasm),) if args.wasm else ())
+    rows = {side: [] for side, _ in sides}
     for _ in range(args.rounds):
-        for side, f in (("sdk", sdk), ("ours", ours)):
+        for side, f in sides:
             wall, rss, out = f(paths)
             rows[side].append((wall, rss))
     # Same verdicts, or the timing means nothing.
@@ -59,7 +65,8 @@ def measure(name, paths):
     res["files"] = len(paths)
     print(f"{name}: SDK {res['sdk']['seconds']*1e3:.0f} ms {res['sdk']['peak_bytes']/2**20:.0f} MB | "
           f"ooxml-validator {res['ours']['seconds']*1e3:.0f} ms {res['ours']['peak_bytes']/2**20:.0f} MB | "
-          f"{res['sdk']['seconds']/res['ours']['seconds']:.1f}x faster", flush=True)
+          f"{res['sdk']['seconds']/res['ours']['seconds']:.1f}x faster"
+          + (f" | wasm {res['wasm']['seconds']*1e3:.0f} ms {res['wasm']['peak_bytes']/2**20:.0f} MB" if args.wasm else ""), flush=True)
     return res
 
 

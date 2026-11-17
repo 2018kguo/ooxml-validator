@@ -87,25 +87,55 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Each relationship in a .rels part: (id, type, target, external).
-fn relationships(xml: &[u8]) -> Vec<(String, String, String, bool)> {
-    let mut out = vec![];
+/// Each relationship in a .rels part: (id, type, target, external). What
+/// System.IO.Packaging refuses to load is an error: another root, a
+/// relationship without Id, Type or Target, a repeated Id, a bad TargetMode.
+fn relationships(xml: &[u8]) -> Result<Vec<(String, String, String, bool)>, String> {
+    let mut out: Vec<(String, String, String, bool)> = vec![];
     let mut r = Reader::new(xml);
-    while let Ok(e) = r.next() {
-        match e {
-            Event::Eof => break,
-            Event::Start { name, .. } if name.ends_with(b"Relationship") => {
-                let get = |k: &[u8]| r.attrs.iter().find(|a| a.name == k).map(|a| String::from_utf8_lossy(a.value).into_owned());
-                if let (Some(t), Some(target)) = (get(b"Type"), get(b"Target")) {
-                    // A Strict relationship reads as Transitional (and makes the package Strict).
-                    let t = crate::strict::relationship(&t).map_or(t, str::to_string);
-                    out.push((get(b"Id").unwrap_or_default(), t, target, get(b"TargetMode").as_deref() == Some("External")));
+    let mut root = true;
+    loop {
+        match r.next().map_err(|e| e.message)? {
+            Event::Eof => return Ok(out),
+            Event::Start { name, .. } => {
+                let local = name.rsplit(|&c| c == b':').next().unwrap_or(name);
+                if root {
+                    root = false;
+                    if local != b"Relationships" {
+                        return Err("Relationships tag expected at root level.".into());
+                    }
+                    continue;
                 }
+                if local != b"Relationship" {
+                    return Err("Unrecognized tag found in Relationships XML.".into());
+                }
+                let get = |k: &[u8]| r.attrs.iter().find(|a| a.name == k).map(|a| String::from_utf8_lossy(a.value).into_owned());
+                let (Some(id), Some(t), Some(target)) = (get(b"Id"), get(b"Type"), get(b"Target")) else {
+                    return Err("A Relationship lacks its Id, Type or Target.".into());
+                };
+                let external = match get(b"TargetMode").as_deref() {
+                    None | Some("Internal") => false,
+                    Some("External") => true,
+                    Some(m) => return Err(format!("'{m}' is not a valid TargetMode.")),
+                };
+                if !crate::validate::ncname(&id) {
+                    return Err(format!("'{id}' ID is not a valid XSD ID."));
+                }
+                if out.iter().any(|o| o.0 == id) {
+                    return Err(format!("'{id}' ID conflicts with the ID of an existing relationship for the specified source."));
+                }
+                // A Strict relationship reads as Transitional (and makes the package Strict).
+                let t = crate::strict::relationship(&t).map_or(t, str::to_string);
+                out.push((id, t, target, external));
             }
             _ => {}
         }
     }
-    out
+}
+
+/// A part name as packages compare them: percent-decoded, without case.
+fn key(name: &str) -> String {
+    percent_decode(name.trim_start_matches('/')).to_lowercase()
 }
 
 fn rels_path(part: &str) -> String {
@@ -163,41 +193,48 @@ pub struct Files {
     /// name (as written: the SDK matches it with case, though parts without).
     defaults: HashMap<String, String>,
     overrides: HashMap<String, String>,
+    /// A Default or Override declared twice: the package can't be opened.
+    duplicate: Option<String>,
 }
 
 impl Files {
     pub fn new(entries: Vec<(String, Vec<u8>)>, names: HashMap<String, String>) -> Files {
-        let index: HashMap<String, usize> = entries.iter().enumerate().map(|(i, e)| (e.0.clone(), i)).collect();
+        let index: HashMap<String, usize> = entries.iter().enumerate().map(|(i, e)| (key(&e.0), i)).collect();
         let (mut defaults, mut overrides) = (HashMap::new(), HashMap::new());
-        if let Some(&i) = index.get("[Content_Types].xml") {
+        let mut duplicate = None;
+        if let Some(&i) = index.get("[content_types].xml") {
             let mut r = Reader::new(&entries[i].1);
             while let Ok(e) = r.next() {
                 let Event::Start { name, .. } = e else {
                     if matches!(e, Event::Eof) { break } else { continue }
                 };
                 let get = |k: &[u8]| r.attrs.iter().find(|a| a.name == k).map(|a| String::from_utf8_lossy(a.value).into_owned());
-                match (name, get(b"ContentType")) {
-                    (b"Default", Some(ct)) => drop(get(b"Extension").map(|x| defaults.insert(x.to_lowercase(), ct))),
-                    (b"Override", Some(ct)) => drop(get(b"PartName").map(|x| overrides.insert(x.trim_start_matches('/').to_string(), ct))),
-                    _ => {}
+                let replaced = match (name, get(b"ContentType")) {
+                    (b"Default", Some(ct)) => get(b"Extension").and_then(|x| defaults.insert(x.to_lowercase(), ct)),
+                    (b"Override", Some(ct)) => get(b"PartName").and_then(|x| overrides.insert(percent_decode(x.trim_start_matches('/')), ct)),
+                    _ => None,
+                };
+                if replaced.is_some() {
+                    duplicate.get_or_insert_with(|| format!("[Content_Types].xml declares a {} twice.", String::from_utf8_lossy(name)));
                 }
             }
         }
-        Files { entries, index, names, defaults, overrides }
+        Files { entries, index, names, defaults, overrides, duplicate }
     }
 
     fn exists(&self, path: &str) -> bool {
-        self.names.contains_key(&path.to_lowercase())
+        self.names.contains_key(&key(path))
     }
 
     /// A part's content type, as the package declares it.
     fn content_type(&self, path: &str) -> Option<&str> {
-        let path = self.names.get(&path.to_lowercase()).map_or(path, String::as_str);
+        let actual = self.names.get(&key(path)).map_or(path.to_string(), |n| percent_decode(n));
+        let path = actual.as_str();
         self.overrides.get(path).or_else(|| self.defaults.get(&path.rsplit_once('.')?.1.to_lowercase())).map(String::as_str)
     }
 
     fn get(&self, name: &str) -> Option<(usize, &[u8])> {
-        self.index.get(name).map(|&i| (i, &self.entries[i].1[..]))
+        self.index.get(&key(name)).map(|&i| (i, &self.entries[i].1[..]))
     }
 }
 
@@ -221,7 +258,15 @@ pub fn validate(files: &Files) -> Outcome {
     let mut index: HashMap<String, usize> = HashMap::new();
     let mut top: Vec<(Option<usize>, usize, String)> = vec![];
     let mut rels_of: Vec<Rels> = vec![];
-    let read_rels = |path: &str| files.get(path).map(|(_, x)| relationships(x)).unwrap_or_default();
+    let mut rels_error: Option<String> = None;
+    let mut read_rels = |path: &str| match files.get(path).map(|(_, x)| relationships(x)) {
+        Some(Ok(r)) => r,
+        Some(Err(e)) => {
+            rels_error.get_or_insert(format!("/{path}: {e}"));
+            vec![]
+        }
+        None => vec![],
+    };
     // StrictRelationshipFound: some relationship the package loads is Strict.
     let mut strict = false;
     let mut note = |rels: &[(String, String, String, bool)], raw: Option<&[u8]>| {
@@ -230,7 +275,7 @@ pub fn validate(files: &Files) -> Outcome {
     // (path, class, parent node, relationship type)
     let mut queue: VecDeque<(String, Option<usize>, Option<usize>, String)> = VecDeque::new();
     // What the SDK throws while loading the package (any one aborts validation).
-    let mut open_error: Option<String> = None;
+    let mut open_error: Option<String> = files.duplicate.clone();
     let mut first_rel: Vec<String> = vec![];
     let root_rels = read_rels("_rels/.rels");
     note(&root_rels, files.get("_rels/.rels").map(|e| e.1));
@@ -396,7 +441,7 @@ pub fn validate(files: &Files) -> Outcome {
             errors.push(ValidationError { id, description: format!("{:?} failed for '{}'.", c.kind, d.value), part: format!("/{}", nodes[n].path), node: d.node, error_type: "Semantic" });
         }
     }
-    Outcome { errors, parsed, malformed, open_error }
+    Outcome { errors, parsed, malformed, open_error: open_error.or(rels_error) }
 }
 
 /// Whether an internal relationship loads a part (LoadReferencedPartsAndRelationships):
@@ -481,14 +526,18 @@ pub fn check(bytes: &[u8]) -> Report {
         return fail("DOCX exceeds the 10000-part validation limit.".into());
     }
     let mut names = HashMap::new();
+    let mut seen = std::collections::HashSet::new();
     let mut budget: u64 = 128 << 20;
     let mut entries = vec![];
+    // Entries whose bytes don't decode as their encoding says: (index, message).
+    let mut undecodable: Option<(usize, String)> = None;
     for i in 0..zip.len() {
         let Ok(f) = zip.by_index(i) else { return fail("unreadable entry".into()) };
         let name = f.name().to_string();
-        if names.insert(name.to_lowercase(), name.clone()).is_some() {
+        if !seen.insert(name.to_lowercase()) {
             return fail("DOCX contains ambiguous duplicate ZIP part names.".into());
         }
+        names.insert(key(&name), name.clone());
         let lower = name.to_lowercase();
         if !lower.ends_with(".xml") && !lower.ends_with(".rels") {
             continue;
@@ -501,6 +550,12 @@ pub fn check(bytes: &[u8]) -> Report {
         let mut xml = Vec::with_capacity(f.size() as usize);
         if let Err(e) = f.take(budget + 1).read_to_end(&mut xml) {
             return fail(e.to_string());
+        }
+        // Parts in UTF-16 or Latin-1 are read as text, as XmlReader reads them.
+        match crate::encoding::to_utf8(&xml) {
+            Ok(std::borrow::Cow::Owned(utf8)) => xml = utf8,
+            Ok(_) => {}
+            Err(e) => drop(undecodable.get_or_insert((entries.len(), e))),
         }
         entries.push((name, xml));
     }
@@ -515,6 +570,12 @@ pub fn check(bytes: &[u8]) -> Report {
             out.malformed = Some((i, ValidationError { id: "xml_parse", description: message, part: format!("/{name}"), node: String::new(), error_type: "Xml" }));
             break;
         }
+    }
+    if let Some((i, message)) = undecodable
+        && out.malformed.as_ref().is_none_or(|m| i < m.0)
+    {
+        let part = format!("/{}", files.entries[i].0);
+        out.malformed = Some((i, ValidationError { id: "xml_parse", description: message, part, node: String::new(), error_type: "Xml" }));
     }
     if let Some((_, e)) = out.malformed {
         return Report { open_error: Some(e.description.clone()), errors: vec![e] };
