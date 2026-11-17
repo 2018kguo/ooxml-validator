@@ -1,5 +1,5 @@
 <h1 align="center">ooxml-validator</h1>
-<p align="center">Microsoft's Open XML SDK validator for Word documents, rewritten in Rust: the same verdicts, [[X]]× faster, no .NET.</p>
+<p align="center">Microsoft's Open XML SDK validator for Word documents, rewritten in Rust: the same verdicts, 24× faster, no .NET.</p>
 <p align="center">
   <a href="#use-it">Get started</a> ·
   <a href="#how-it-agrees">How it agrees</a> ·
@@ -7,7 +7,7 @@
   <a href="DESIGN.md">How it works</a>
 </p>
 
-![The Open XML SDK and ooxml-validator each checking a 400-page report and then a broken file: the same verdicts, the SDK in [[SDK_S]], ooxml-validator in [[OURS_MS]]](docs/demo.gif)
+![The Open XML SDK and ooxml-validator each checking a 400-page report and then a broken file: the same verdicts, the SDK in 1.8 s, ooxml-validator in 73 ms](docs/demo.gif)
 
 *A real terminal session: the SDK runs through the small C# program in `fuzz/oracle`, then
 `ooxml-validator` runs on the same files.*
@@ -22,9 +22,10 @@ cargo install ooxml-validator              # a native binary
 ```sh
 $ ooxml-validator report.docx broken.docx
 report.docx: ok
-broken.docx: 2 errors
-  /word/document.xml w:rPr Sch_UnexpectedElementContentExpectingComplex: The element 'w:rPr' has an out-of-place child element (Sch_UnexpectedElementContentExpectingComplex).
+broken.docx: 3 errors
+  /word/document.xml w:rPr Sch_UnexpectedElementContentExpectingComplex: The element 'w:rPr' has unexpected child element 'w:b'.
   /word/styles.xml w:shd Sch_MissRequiredAttribute: The required attribute 'val' is missing.
+  /word/styles.xml w:tblPr Sch_UnexpectedElementContentExpectingComplex: The element 'w:tblPr' has unexpected child element 'w:tblBorders'.
 ```
 
 It exits 1 when any file is invalid. `--json` prints one object per file with every error's id,
@@ -74,17 +75,22 @@ error ids:
   relationship, an encoding .NET doesn't read.
 - **Strict documents (ISO 29500):** read as Transitional, as the SDK reads them.
 
-Descriptions are its own, shorter than the SDK's, and an error names its element rather than an
-XPath.
+Descriptions follow the SDK's wording without its long expected-element lists, and an error names
+its element rather than an XPath. A parse error carries its line and column.
 
 ## How fast
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks-dark.svg">
-  <img src="docs/benchmarks-light.svg" alt="[[ALT]]">
+  <img src="docs/benchmarks-light.svg" alt="Bar charts: a 400-page report validates in 47 ms with ooxml-validator and 1.14 s with the Open XML SDK; 419 documents in 181 ms and 5.26 s; peak memory 13 MB and 143 MB.">
 </picture>
 
-[[BENCH_TEXT]]
+Measured on an Apple M5 Pro, the median of 5 runs, each a fresh process so startup counts:
+
+| | ooxml-validator | WebAssembly (Node) | Open XML SDK |
+|---|---:|---:|---:|
+| 400-page report | 47 ms, 13 MB | 216 ms, 87 MB | 1.14 s, 143 MB |
+| 419 SDK test documents | 181 ms, 16 MB | 547 ms, 95 MB | 5.26 s, 159 MB |
 
 The SDK side is published ReadyToRun, its fastest setup. To rerun it:
 
@@ -113,7 +119,7 @@ The SDK is the reference, quirks included, and the tests check against the SDK i
   report. CI runs it on every push.
 - Every week CI fuzzes with a new seed and tries the newest SDK release on NuGet. A release that
   agrees becomes a pull request, one that doesn't becomes an issue.
-- Before release it also agreed with the SDK on [[N_DOCS]] documents in all: those, plus more than
+- Before release it also agreed with the SDK on 9,337 documents in all: those, plus more than
   7,000 real-world files and their mutants.
 
 ## Limits
@@ -121,7 +127,7 @@ The SDK is the reference, quirks included, and the tests check against the SDK i
 - Word documents only (.docx, .docm, .dotx). Not Excel or PowerPoint.
 - The Microsoft365 file format only, the newest the SDK knows.
 - Error descriptions and order differ from the SDK's; the set of error ids doesn't.
-- Pinned to SDK [[SDK_VERSION]] until the weekly job proposes a newer one.
+- Pinned to SDK 3.5.1 until the weekly job proposes a newer one.
 
 ## License
 

@@ -1,0 +1,37 @@
+{
+  "machine": "arm64",
+  "cpu": "Apple M5 Pro",
+  "rounds": 5,
+  "runs": {
+    "report-400.docx": {
+      "sdk": {
+        "seconds": 1.142826000000003,
+        "peak_bytes": 150175744
+      },
+      "ours": {
+        "seconds": 0.04722254200000009,
+        "peak_bytes": 13778944
+      },
+      "wasm": {
+        "seconds": 0.21637058299999978,
+        "peak_bytes": 91029504
+      },
+      "files": 1
+    },
+    "corpus": {
+      "sdk": {
+        "seconds": 5.256711915999997,
+        "peak_bytes": 167100416
+      },
+      "ours": {
+        "seconds": 0.1814621669999994,
+        "peak_bytes": 17055744
+      },
+      "wasm": {
+        "seconds": 0.546913791999998,
+        "peak_bytes": 99237888
+      },
+      "files": 419
+    }
+  }
+}
