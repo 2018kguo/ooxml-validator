@@ -32,7 +32,7 @@ def sdk(paths, dll, jobs):
 def validator(paths, binary):
     out = {}
     for i in range(0, len(paths), 500):
-        res = subprocess.run([binary] + paths[i:i+500], capture_output=True, text=True).stdout
+        res = subprocess.run([binary, "--json", "--max-errors", "0"] + paths[i:i+500], capture_output=True, text=True).stdout
         for line in res.splitlines():
             d = json.loads(line); out[d["path"]] = d
     return out
@@ -58,7 +58,7 @@ def main():
                 rows.append({"kind": kind, "path": path, "sdk": ["open: " + a["OpenError"][:200]], "ooxml-validator": []})
             continue
         sdk_ids = sorted(e["Id"] for e in a["Errors"] if not (schema_only and e["Id"].startswith(("Sem_", "Pkg_"))))
-        mine = sorted(b["ids"])
+        mine = sorted(e["id"] for e in b["errors"] if not (schema_only and e["id"].startswith(("Sem_", "Pkg_"))))
         if not sdk_ids and not mine: kind = "agree-ok"
         elif sdk_ids and not mine: kind = "danger"
         elif mine and not sdk_ids: kind = "extra"
@@ -68,7 +68,7 @@ def main():
         if kind in ("danger", "extra", "ids"):
             first = next((e for e in a["Errors"] if e["Id"] in set(sdk_ids) - set(mine)), a["Errors"][0] if a["Errors"] else None)
             rows.append({"kind": kind, "path": path, "sdk": sorted(set(sdk_ids)), "ooxml-validator": sorted(set(mine)),
-                         "sdk_first": first and (first.get("Part"), first.get("Node"), first.get("Description", "")[:200], first.get("XPath")), "proof_first": b.get("first", "")[:200]})
+                         "sdk_first": first and (first.get("Part"), first.get("Node"), first.get("Description", "")[:200], first.get("XPath")), "ours_first": ((b["errors"] or [{}])[0].get("node", "") + " " + (b["errors"] or [{}])[0].get("description", ""))[:200]})
     json.dump(rows, open(os.path.join(outdir, "diffs.json"), "w"), indent=1)
     print(dict(counts))
     for r in rows[:20]:

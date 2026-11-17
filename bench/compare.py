@@ -42,7 +42,7 @@ def sdk(paths):
 
 
 def ours(paths):
-    return run([args.ours, *paths])
+    return run([args.ours, "--json", *paths])
 
 
 def measure(name, paths):
