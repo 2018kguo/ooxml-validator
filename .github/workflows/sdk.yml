@@ -1,0 +1,54 @@
+name: sdk
+# Weekly: fuzz the pinned SDK release with a new seed, and check the newest
+# DocumentFormat.OpenXml release. A newer release that agrees becomes a pull
+# request (regenerated tables, new pin); one that doesn't becomes an issue.
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+jobs:
+  sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Fuzz the pinned release with a fresh seed
+        run: SEED=${{ github.run_number }} MUTANTS=2000 fuzz/agree.sh
+      - name: Newest release
+        id: latest
+        run: |
+          latest=$(curl -fsS https://api.nuget.org/v3-flatcontainer/documentformat.openxml/index.json | python3 -c 'import json,sys; print([v for v in json.load(sys.stdin)["versions"] if "-" not in v][-1])')
+          echo "version=$latest" >> "$GITHUB_OUTPUT"
+          [ "$latest" != "$(cat SDK_VERSION)" ] && echo "new=true" >> "$GITHUB_OUTPUT" || true
+      - name: Check the newest release
+        id: check
+        if: steps.latest.outputs.new == 'true'
+        continue-on-error: true
+        run: fuzz/agree.sh ${{ steps.latest.outputs.version }} 2>&1 | tee agree.log
+      - name: Propose the new release
+        if: steps.latest.outputs.new == 'true' && steps.check.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ steps.latest.outputs.version }}
+        run: |
+          echo "$V" > SDK_VERSION
+          sed -i "s|>[0-9.]*</OpenXmlVersion>|>$V</OpenXmlVersion>|" fuzz/oracle/Oracle.csproj
+          git switch -c "sdk-$V"
+          git -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com commit -am "Track Open XML SDK $V"
+          git push -u origin "sdk-$V"
+          gh pr create --title "Track Open XML SDK $V" --body "fuzz/agree.sh $V agrees on every document."
+      - name: Report drift
+        if: steps.latest.outputs.new == 'true' && steps.check.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ steps.latest.outputs.version }}
+        run: |
+          { echo "\`fuzz/agree.sh $V\` disagrees with the new SDK release:"; echo '```'; tail -40 agree.log; echo '```'; } > body.md
+          gh issue create --title "Open XML SDK $V disagrees" --body-file body.md

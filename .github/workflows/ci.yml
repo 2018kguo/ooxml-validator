@@ -8,3 +8,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --release --workspace
       - run: cargo build --release --examples
+  # Every verdict must match Microsoft's Open XML SDK at the pinned release.
+  agree:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: fuzz/agree.sh

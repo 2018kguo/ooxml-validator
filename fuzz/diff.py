@@ -5,8 +5,8 @@ usage: python3 fuzz/diff.py LIST OUT_DIR [--jobs N] [--schema]
   target/release/ooxml-validator); ORACLE the built SDK oracle (default
   fuzz/oracle/bin/out/Oracle.dll: dotnet build -c Release -o bin/out there).
 
-Compares error ids over all parts; --schema leaves out the SDK's semantic
-(Sem_*) and package (Pkg_*) errors, which ooxml-validator does not check yet:
+Compares error ids over all parts (--schema leaves out Sem_* and Pkg_*), and
+exits 1 on any disagreement:
   danger  ooxml-validator accepts what the SDK rejects   (must be zero)
   extra   ooxml-validator rejects what the SDK accepts
   ids     both reject, with different error id multisets
@@ -71,5 +71,9 @@ def main():
                          "sdk_first": first and (first.get("Part"), first.get("Node"), first.get("Description", "")[:200], first.get("XPath")), "proof_first": b.get("first", "")[:200]})
     json.dump(rows, open(os.path.join(outdir, "diffs.json"), "w"), indent=1)
     print(dict(counts))
+    for r in rows[:20]:
+        print(r["kind"], r["path"], "sdk:", r["sdk"], "ours:", r["ooxml-validator"])
+    # Any disagreement fails (CI runs this).
+    sys.exit(1 if rows else 0)
 
 main()
