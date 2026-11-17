@@ -19,6 +19,7 @@ fn err<T>(at: usize, message: impl Into<String>) -> Result<T, XmlError> {
     Err(XmlError { at, message: message.into() })
 }
 
+#[derive(Clone, Copy)]
 pub struct RawAttr<'a> {
     pub name: &'a [u8],
     pub value: &'a [u8],

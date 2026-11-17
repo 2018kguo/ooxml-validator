@@ -74,7 +74,8 @@ struct Frame {
 pub struct Part<'a> {
     reader: Reader<'a>,
     part: &'a str,
-    bindings: Vec<(&'a [u8], &'a [u8])>,
+    /// In-scope namespace declarations: (prefix, URI, namespace id).
+    bindings: Vec<(&'a [u8], &'a [u8], u32)>,
     ignorable: Vec<u32>,
     /// ProcessContent entries: (namespace, local name or "*").
     process: Vec<(u32, &'a [u8])>,
@@ -112,7 +113,7 @@ impl<'a> Part<'a> {
             deferred: vec![],
             reader: Reader::new(xml),
             part,
-            bindings: vec![(b"xml", XML_NS)],
+            bindings: vec![(b"xml", XML_NS, ns_ids()[XML_NS])],
             ignorable: vec![],
             process: vec![],
             frames: Vec::with_capacity(64),
@@ -126,6 +127,14 @@ impl<'a> Part<'a> {
 
     fn lookup(&self, prefix: &[u8]) -> Option<&'a [u8]> {
         self.bindings.iter().rev().find(|b| b.0 == prefix).map(|b| b.1)
+    }
+
+    /// The namespace id a prefix is bound to; an unbound default prefix is "" (id 0).
+    fn lookup_id(&self, prefix: &[u8]) -> Option<u32> {
+        match self.bindings.iter().rev().find(|b| b.0 == prefix) {
+            Some(b) => Some(b.2),
+            None => prefix.is_empty().then_some(0),
+        }
     }
 
     fn ns_id(&mut self, uri: &'a [u8]) -> u32 {
@@ -207,19 +216,21 @@ impl<'a> Part<'a> {
     fn start(&mut self, name: &'a [u8], root: u16) {
         // Namespace declarations first: they scope this element's own name.
         let mark = self.bindings.len();
-        for a in &self.reader.attrs {
+        for i in 0..self.reader.attrs.len() {
+            let a = self.reader.attrs[i];
             if a.name == b"xmlns" {
-                self.bindings.push((b"", a.value));
+                let id = self.ns_id(a.value);
+                self.bindings.push((b"", a.value, id));
             } else if let Some(p) = a.name.strip_prefix(b"xmlns:") {
-                self.bindings.push((p, a.value));
+                let id = self.ns_id(a.value);
+                self.bindings.push((p, a.value, id));
             }
         }
         let (prefix, local) = match memchr::memchr(b':', name) {
             Some(i) => (&name[..i], &name[i + 1..]),
             None => (&b""[..], name),
         };
-        let uri = self.lookup(prefix).unwrap_or(b"");
-        let ns = self.ns_id(uri);
+        let ns = self.lookup_id(prefix).unwrap_or(0);
         let qname = String::from_utf8_lossy(name).into_owned();
 
         // MC attributes this element carries scope its content (and itself).
@@ -304,7 +315,7 @@ impl<'a> Part<'a> {
     fn classify(&mut self, ns: u32, local: &'a [u8], qname: &str, root: u16) -> Kind {
         let Some(parent) = self.frames.last() else {
             let t = &TYPES[root as usize];
-            if ns_ids().get(NAMESPACES[t.ns as usize].as_bytes()) == Some(&ns) && t.local.as_bytes() == local {
+            if t.ns as u32 == ns && t.local.as_bytes() == local {
                 return Kind::Typed(root);
             }
             self.error("Sch_InvalidRootElement", qname, format!("The root element '{qname}' is not expected here."));
@@ -362,7 +373,7 @@ impl<'a> Part<'a> {
             }
             let (cs, cn) = t.children;
             let named = CHILDREN[cs as usize..cs as usize + cn as usize].iter().any(|c| {
-                c.local.as_bytes() == local && ns_ids().get(NAMESPACES[c.ns as usize].as_bytes()) == Some(&ns) && TYPES[c.ty as usize].version <= TARGET_VERSION
+                c.ns as u32 == ns && c.local.as_bytes() == local && TYPES[c.ty as usize].version <= TARGET_VERSION
             });
             self.kids.push(Kid { ty: NONE, ns, named });
             return Kind::Skip;
@@ -382,7 +393,7 @@ impl<'a> Part<'a> {
         // A strong-typed child: known to its owner's factory.
         let (cs, cn) = t.children;
         for c in &CHILDREN[cs as usize..cs as usize + cn as usize] {
-            if c.local.as_bytes() == local && ns_ids().get(NAMESPACES[c.ns as usize].as_bytes()) == Some(&ns) {
+            if c.ns as u32 == ns && c.local.as_bytes() == local {
                 if TYPES[c.ty as usize].version <= TARGET_VERSION {
                     self.kids.push(Kid { ty: c.ty, ns, named: false });
                     return Kind::Typed(c.ty);
@@ -588,8 +599,7 @@ impl<'a> Part<'a> {
             }
             let (ns, local) = match memchr::memchr(b':', name) {
                 Some(i) => {
-                    let uri = self.lookup(&name[..i]).unwrap_or(b"");
-                    (self.ns_id(uri), &name[i + 1..])
+                    (self.lookup_id(&name[..i]).unwrap_or(0), &name[i + 1..])
                 }
                 None => (0, name),
             };
@@ -597,7 +607,7 @@ impl<'a> Part<'a> {
         }
         let mut values: Vec<Option<String>> = Vec::with_capacity(declared.len());
         for a in declared {
-            let ans = ns_ids().get(NAMESPACES[a.ns as usize].as_bytes()).copied().unwrap_or(u32::MAX);
+            let ans = a.ns as u32;
             let found = present.iter_mut().find(|p| p.0 == ans && p.1 == a.local.as_bytes());
             let value = found.map(|p| {
                 p.3 = true;
