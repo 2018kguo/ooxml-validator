@@ -5,6 +5,10 @@ license = "MIT"
 description = "A streaming .docx validator that gives the Open XML SDK's verdicts"
 edition = "2024"
 
+[lib]
+# cdylib: the WebAssembly build the npm package ships.
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 memchr = "2"
 rustc-hash = "2"

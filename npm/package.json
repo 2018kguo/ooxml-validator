@@ -1,0 +1,15 @@
+{
+  "name": "@2018kguo/ooxml-validator",
+  "version": "0.1.0",
+  "description": "Validate .docx files exactly as Microsoft's Open XML SDK does, without .NET: Rust compiled to WebAssembly.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": { "types": "./index.d.ts", "default": "./index.js" }
+  },
+  "bin": { "ooxml-validator": "./cli.js" },
+  "files": ["index.js", "index.d.ts", "cli.js", "ooxml_validator.wasm", "README.md", "LICENSE", "NOTICE"],
+  "engines": { "node": ">=20" },
+  "repository": { "type": "git", "url": "git+https://github.com/2018kguo/ooxml-validator.git" },
+  "keywords": ["docx", "ooxml", "openxml", "word", "validator", "wasm"]
+}

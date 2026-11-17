@@ -431,6 +431,37 @@ impl Report {
     pub fn ok(&self) -> bool {
         self.open_error.is_none() && self.errors.is_empty()
     }
+
+    /// {"ok","openError","errors":[{"id","description","part","node","errorType"}]},
+    /// with at most `max` errors (0: all).
+    pub fn to_json(&self, max: usize) -> String {
+        let n = if max == 0 { self.errors.len() } else { self.errors.len().min(max) };
+        let errors: Vec<String> = self.errors[..n]
+            .iter()
+            .map(|e| format!("{{\"id\":{},\"description\":{},\"part\":{},\"node\":{},\"errorType\":{}}}", json(e.id), json(&e.description), json(&e.part), json(&e.node), json(e.error_type)))
+            .collect();
+        let open = self.open_error.as_deref().map_or("null".to_string(), json);
+        format!("{{\"ok\":{},\"openError\":{open},\"errors\":[{}]}}", self.ok(), errors.join(","))
+    }
+}
+
+/// A JSON string literal.
+pub fn json(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Validates a .docx as bytes: package limits; every XML entry well formed

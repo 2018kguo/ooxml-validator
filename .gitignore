@@ -1,3 +1,8 @@
 target/
 fuzz/oracle/bin/
 fuzz/oracle/obj/
+npm/ooxml_validator.wasm
+npm/README.md
+npm/LICENSE
+npm/NOTICE
+npm/node_modules/

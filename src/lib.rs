@@ -21,3 +21,5 @@ pub mod schema_gen;
 pub mod validate;
 pub mod values;
 pub mod xml;
+#[cfg(target_arch = "wasm32")]
+pub mod wasm;

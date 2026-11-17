@@ -8,24 +8,6 @@
 
 use std::io::Write;
 
-fn json(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
 fn main() {
     let mut args = std::env::args().skip(1);
     let (mut as_json, mut max, mut paths) = (false, 1000usize, vec![]);
@@ -51,12 +33,8 @@ fn main() {
         all_ok &= report.ok();
         let errors = &report.errors[..if max == 0 { report.errors.len() } else { report.errors.len().min(max) }];
         if as_json {
-            let list: Vec<String> = errors
-                .iter()
-                .map(|e| format!("{{\"id\":{},\"description\":{},\"part\":{},\"node\":{},\"errorType\":{}}}", json(e.id), json(&e.description), json(&e.part), json(&e.node), json(e.error_type)))
-                .collect();
-            let open = report.open_error.as_deref().map_or("null".to_string(), json);
-            writeln!(out, "{{\"path\":{},\"ok\":{},\"openError\":{open},\"errors\":[{}]}}", json(&path), report.ok(), list.join(",")).unwrap();
+            let body = report.to_json(max);
+            writeln!(out, "{{\"path\":{},{}", ooxml_validator::package::json(&path), &body[1..]).unwrap();
         } else if let Some(e) = &report.open_error {
             writeln!(out, "{path}: cannot be opened: {e}").unwrap();
         } else if report.errors.is_empty() {
