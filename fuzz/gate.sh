@@ -1,5 +1,5 @@
 #!/bin/sh
-# gate.sh LIST: rebuild, run the tests, then diff proof against the SDK on
+# gate.sh LIST: rebuild, run the tests, then diff obstat against the SDK on
 # LIST; fails unless every document agrees.
 set -eu
 cd "$(dirname "$0")/.."

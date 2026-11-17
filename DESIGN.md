@@ -1,4 +1,4 @@
-# proof: a streaming OOXML validator
+# obstat: a streaming OOXML validator
 
 Goal: give the same verdict as Microsoft's Open XML SDK validator
 (`OpenXmlValidator(FileFormatVersions.Microsoft365)`, DocumentFormat.OpenXml
@@ -8,7 +8,7 @@ Goal: give the same verdict as Microsoft's Open XML SDK validator
 
 On a 166-page document (6.9 MB `document.xml`) the SDK takes ~1.1 s inside
 `Validate`: 38% building its DOM, 34% attribute checks (each union member that
-fails builds a localized error string, then discards it). proof gives the same
+fails builds a localized error string, then discards it). obstat gives the same
 verdict for the whole package in 0.2 s and 19 MB (the SDK: ~1.9 s, 190 MB).
 
 ## Shape
@@ -36,7 +36,7 @@ semantic constraints (with Application = Word filtering), package validation.
 Checked by differential runs against the SDK (`fuzz/oracle`, `fuzz/diff.py`)
 on real-world documents and on mutants of them (`fuzz/mutate.py`: delete,
 duplicate, swap, move, rename elements; drop, add, perturb attributes; wrap in
-AlternateContent or ignorable elements). The invariant: proof never accepts a
+AlternateContent or ignorable elements). The invariant: obstat never accepts a
 package the SDK rejects. Error id sets should match too.
 
 ## SDK semantics confirmed from source (v3.5.1)

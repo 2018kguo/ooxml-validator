@@ -1,4 +1,4 @@
-//! proof FILE.docx...: validates each document's main part and prints one
+//! obstat FILE.docx...: validates each document's main part and prints one
 //! JSON line per file: {"path", "ok", "ids", "parts", "first"}.
 
 use std::io::Write;
@@ -12,7 +12,7 @@ fn main() {
     let mut out = out.lock();
     for path in std::env::args().skip(1) {
         let result = std::fs::read(&path).map_err(|e| e.to_string()).and_then(|b| {
-            let r = proof::package::check(&b);
+            let r = obstat::package::check(&b);
             match r.open_error {
                 Some(e) if r.errors.is_empty() => Err(e),
                 _ => Ok(r.errors),

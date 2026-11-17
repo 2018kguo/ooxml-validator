@@ -213,7 +213,7 @@ pub fn validate(files: &Files) -> Outcome {
         if n + 1 != nodes.len() {
             continue; // reached before
         }
-        if std::env::var_os("PROOF_TRACE").is_some() {
+        if std::env::var_os("OBSTAT_TRACE").is_some() {
             eprintln!("part {path} {:?}", cls.map(|c| PARTS[c].name));
         }
         if cls.is_some_and(|c| PARTS[c].version > TARGET_VERSION) {

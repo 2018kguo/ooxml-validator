@@ -1,6 +1,6 @@
 //! Small documents with the error ids the Open XML SDK 3.5.1 reports for them
 //! (recorded with fuzz/oracle). Each pins a behavior a fuzzing or corpus run
-//! once found proof getting wrong, or a rule easy to break.
+//! once found obstat getting wrong, or a rule easy to break.
 
 use std::io::Write;
 
@@ -22,7 +22,7 @@ fn docx(document: &str) -> Vec<u8> {
 }
 
 fn ids(document: &str) -> Vec<&'static str> {
-    let mut v: Vec<&'static str> = proof::package::check(&docx(document)).errors.iter().map(|e| e.id).collect();
+    let mut v: Vec<&'static str> = obstat::package::check(&docx(document)).errors.iter().map(|e| e.id).collect();
     v.sort();
     v.dedup();
     v

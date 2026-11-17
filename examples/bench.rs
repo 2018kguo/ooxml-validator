@@ -8,7 +8,7 @@ fn main() {
     let mut errors = 0;
     for _ in 0..n {
         let t = std::time::Instant::now();
-        errors = proof::package::check(&bytes).errors.len();
+        errors = obstat::package::check(&bytes).errors.len();
         times.push(t.elapsed());
     }
     times.sort();

@@ -1,4 +1,4 @@
-# proof
+# obstat
 
 A fast, streaming validator for Word documents (.docx) that gives the same
 verdict as Microsoft's [Open XML SDK](https://github.com/dotnet/Open-XML-SDK)
@@ -8,7 +8,7 @@ No .NET, no DOM: one pass over each part.
 
 ```
 cargo build --release
-./target/release/proof file.docx another.docx
+./target/release/obstat file.docx another.docx
 {"path":"file.docx","ok":true,"ids":[],"parts":[],"first":""}
 ```
 
@@ -26,9 +26,9 @@ takes 1.9 s and 190 MB.
 - `fuzz/` checks it against the SDK itself: `fuzz/oracle` is a small .NET
   program around the SDK; `fuzz/diff.py` compares verdicts and error ids on a
   list of files; `fuzz/mutate.py` makes mutants of real documents to compare
-  on. The bar: proof never accepts a document the SDK rejects.
+  on. The bar: obstat never accepts a document the SDK rejects.
 
 ## Status
 
 Every reachable part of a WordprocessingML package. Error ids match the SDK;
-descriptions are proof's own, and errors carry no XPath yet.
+descriptions are obstat's own, and errors carry no XPath yet.

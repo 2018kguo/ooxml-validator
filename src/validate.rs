@@ -29,10 +29,10 @@ pub struct ValidationError {
     pub error_type: &'static str,
 }
 
-/// PROOF_TRACE set: print each element's children and verdict.
+/// OBSTAT_TRACE set: print each element's children and verdict.
 fn trace() -> bool {
     static T: OnceLock<bool> = OnceLock::new();
-    *T.get_or_init(|| std::env::var_os("PROOF_TRACE").is_some())
+    *T.get_or_init(|| std::env::var_os("OBSTAT_TRACE").is_some())
 }
 
 /// A prefix packed into a u64: up to 7 bytes exactly (with the length), else
