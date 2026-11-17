@@ -2,6 +2,7 @@
 
 pub mod names;
 pub mod package;
+pub mod strict;
 pub mod particle;
 pub mod schema;
 pub mod semantic;

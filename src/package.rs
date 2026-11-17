@@ -97,6 +97,8 @@ fn relationships(xml: &[u8]) -> Vec<(String, String, String, bool)> {
             Event::Start { name, .. } if name.ends_with(b"Relationship") => {
                 let get = |k: &[u8]| r.attrs.iter().find(|a| a.name == k).map(|a| String::from_utf8_lossy(a.value).into_owned());
                 if let (Some(t), Some(target)) = (get(b"Type"), get(b"Target")) {
+                    // A Strict relationship reads as Transitional (and makes the package Strict).
+                    let t = crate::strict::relationship(&t).map_or(t, str::to_string);
                     out.push((get(b"Id").unwrap_or_default(), t, target, get(b"TargetMode").as_deref() == Some("External")));
                 }
             }
@@ -155,12 +157,43 @@ fn referenced(nodes: &[Node], package: &[(Option<usize>, usize, String)], curren
 pub struct Files {
     pub entries: Vec<(String, Vec<u8>)>,
     index: HashMap<String, usize>,
+    /// Every entry's name by its lowercase form (part names compare without case).
+    names: HashMap<String, String>,
+    /// [Content_Types].xml: Default by extension (lowercased), Override by part
+    /// name (as written: the SDK matches it with case, though parts without).
+    defaults: HashMap<String, String>,
+    overrides: HashMap<String, String>,
 }
 
 impl Files {
-    pub fn new(entries: Vec<(String, Vec<u8>)>) -> Files {
-        let index = entries.iter().enumerate().map(|(i, e)| (e.0.clone(), i)).collect();
-        Files { entries, index }
+    pub fn new(entries: Vec<(String, Vec<u8>)>, names: HashMap<String, String>) -> Files {
+        let index: HashMap<String, usize> = entries.iter().enumerate().map(|(i, e)| (e.0.clone(), i)).collect();
+        let (mut defaults, mut overrides) = (HashMap::new(), HashMap::new());
+        if let Some(&i) = index.get("[Content_Types].xml") {
+            let mut r = Reader::new(&entries[i].1);
+            while let Ok(e) = r.next() {
+                let Event::Start { name, .. } = e else {
+                    if matches!(e, Event::Eof) { break } else { continue }
+                };
+                let get = |k: &[u8]| r.attrs.iter().find(|a| a.name == k).map(|a| String::from_utf8_lossy(a.value).into_owned());
+                match (name, get(b"ContentType")) {
+                    (b"Default", Some(ct)) => drop(get(b"Extension").map(|x| defaults.insert(x.to_lowercase(), ct))),
+                    (b"Override", Some(ct)) => drop(get(b"PartName").map(|x| overrides.insert(x.trim_start_matches('/').to_string(), ct))),
+                    _ => {}
+                }
+            }
+        }
+        Files { entries, index, names, defaults, overrides }
+    }
+
+    fn exists(&self, path: &str) -> bool {
+        self.names.contains_key(&path.to_lowercase())
+    }
+
+    /// A part's content type, as the package declares it.
+    fn content_type(&self, path: &str) -> Option<&str> {
+        let path = self.names.get(&path.to_lowercase()).map_or(path, String::as_str);
+        self.overrides.get(path).or_else(|| self.defaults.get(&path.rsplit_once('.')?.1.to_lowercase())).map(String::as_str)
     }
 
     fn get(&self, name: &str) -> Option<(usize, &[u8])> {
@@ -175,6 +208,8 @@ pub struct Outcome {
     pub parsed: Vec<bool>,
     /// The first part, in zip order, that is not well-formed XML.
     pub malformed: Option<(usize, ValidationError)>,
+    /// The package can't be loaded as the SDK loads it.
+    pub open_error: Option<String>,
 }
 
 /// Validates every reachable part of a package: discovers the part tree from
@@ -187,17 +222,43 @@ pub fn validate(files: &Files) -> Outcome {
     let mut top: Vec<(Option<usize>, usize, String)> = vec![];
     let mut rels_of: Vec<Rels> = vec![];
     let read_rels = |path: &str| files.get(path).map(|(_, x)| relationships(x)).unwrap_or_default();
+    // StrictRelationshipFound: some relationship the package loads is Strict.
+    let mut strict = false;
+    let mut note = |rels: &[(String, String, String, bool)], raw: Option<&[u8]>| {
+        strict |= raw.is_some_and(|x| memchr::memmem::find(x, b"http://purl.oclc.org/ooxml/officeDocument/relationships/").is_some()) && !rels.is_empty();
+    };
     // (path, class, parent node, relationship type)
     let mut queue: VecDeque<(String, Option<usize>, Option<usize>, String)> = VecDeque::new();
-    for (_, t, target, external) in read_rels("_rels/.rels") {
-        if !external {
+    // What the SDK throws while loading the package (any one aborts validation).
+    let mut open_error: Option<String> = None;
+    let mut first_rel: Vec<String> = vec![];
+    let root_rels = read_rels("_rels/.rels");
+    note(&root_rels, files.get("_rels/.rels").map(|e| e.1));
+    for (_, t, target, external) in root_rels {
+        if !external && loads_part(files, &t, &resolve("", &target), &target, &mut open_error) {
             queue.push_back((resolve("", &target), child_class(package, &t).or_else(|| global_class(&t)), None, t));
         }
     }
     while let Some((path, cls, parent, rel)) = queue.pop_front() {
         let n = match index.get(&path) {
-            Some(&n) => n,
+            Some(&n) => {
+                // A shared part must be reached by one relationship type.
+                if first_rel[n] != rel {
+                    open_error.get_or_insert_with(|| format!("The same part /{path} is referenced by different relationship types."));
+                }
+                n
+            }
             None => {
+                if !files.exists(&path) {
+                    open_error.get_or_insert_with(|| format!("Part: /{path} doesn't exist in the package."));
+                }
+                if let Some(c) = cls
+                    && !PARTS[c].content_type.is_empty()
+                    && files.content_type(&path) != Some(PARTS[c].content_type)
+                {
+                    open_error.get_or_insert_with(|| format!("The part /{path} has content type {:?}; expected {}.", files.content_type(&path).unwrap_or(""), PARTS[c].content_type));
+                }
+                first_rel.push(rel.clone());
                 let n = nodes.len();
                 nodes.push(Node { path: path.clone(), class: cls, parent, children: vec![], facts: Facts::default(), has_root: false });
                 rels_of.push(Rels::default());
@@ -213,16 +274,17 @@ pub fn validate(files: &Files) -> Outcome {
         if n + 1 != nodes.len() {
             continue; // reached before
         }
-        if std::env::var_os("OBSTAT_TRACE").is_some() {
+        if std::env::var_os("OOXML_VALIDATOR_TRACE").is_some() {
             eprintln!("part {path} {:?}", cls.map(|c| PARTS[c].name));
         }
         if cls.is_some_and(|c| PARTS[c].version > TARGET_VERSION) {
             continue;
         }
         let rels = read_rels(&rels_path(&path));
+        note(&rels, files.get(&rels_path(&path)).map(|e| e.1));
         rels_of[n] = Rels { types: rels.iter().map(|(id, t, _, _)| (id.clone(), t.clone())).collect() };
         for (_, t, target, external) in rels {
-            if !external {
+            if !external && loads_part(files, &t, &resolve(&path, &target), &target, &mut open_error) {
                 let child = cls.and_then(|c| child_class(c, &t)).or_else(|| global_class(&t));
                 queue.push_back((resolve(&path, &target), child, Some(n), t));
             }
@@ -249,7 +311,7 @@ pub fn validate(files: &Files) -> Outcome {
             loop {
                 let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let Some(&(n, _, xml, root)) = jobs.get(k) else { break };
-                out.push((n, validate_part(xml, &format!("/{}", nodes[n].path), root, &rels_of[n])));
+                out.push((n, validate_part(xml, &format!("/{}", nodes[n].path), root, &rels_of[n], strict)));
             }
             out
         };
@@ -334,7 +396,29 @@ pub fn validate(files: &Files) -> Outcome {
             errors.push(ValidationError { id, description: format!("{:?} failed for '{}'.", c.kind, d.value), part: format!("/{}", nodes[n].path), node: d.node, error_type: "Semantic" });
         }
     }
-    Outcome { errors, parsed, malformed }
+    Outcome { errors, parsed, malformed, open_error }
+}
+
+/// Whether an internal relationship loads a part (LoadReferencedPartsAndRelationships):
+/// hyperlinks and "NULL" targets never do; media, audio and video references load
+/// a data part, which must exist.
+fn loads_part(files: &Files, rel: &str, path: &str, target: &str, open_error: &mut Option<String>) -> bool {
+    const HYPERLINK: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink";
+    const DATA: [&str; 3] = [
+        "http://schemas.microsoft.com/office/2007/relationships/media",
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/audio",
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/video",
+    ];
+    if rel == HYPERLINK || target.eq_ignore_ascii_case("NULL") {
+        return false;
+    }
+    if DATA.contains(&rel) {
+        if !files.exists(path) {
+            open_error.get_or_insert_with(|| format!("Part: /{path} doesn't exist in the package."));
+        }
+        return false;
+    }
+    true
 }
 
 /// The verdict on one .docx: a package that cannot be read is not OK.
@@ -365,13 +449,13 @@ pub fn check(bytes: &[u8]) -> Report {
     if zip.len() > 10000 {
         return fail("DOCX exceeds the 10000-part validation limit.".into());
     }
-    let mut names = std::collections::HashSet::new();
+    let mut names = HashMap::new();
     let mut budget: u64 = 128 << 20;
     let mut entries = vec![];
     for i in 0..zip.len() {
         let Ok(f) = zip.by_index(i) else { return fail("unreadable entry".into()) };
         let name = f.name().to_string();
-        if !names.insert(name.to_lowercase()) {
+        if names.insert(name.to_lowercase(), name.clone()).is_some() {
             return fail("DOCX contains ambiguous duplicate ZIP part names.".into());
         }
         let lower = name.to_lowercase();
@@ -389,7 +473,7 @@ pub fn check(bytes: &[u8]) -> Report {
         }
         entries.push((name, xml));
     }
-    let files = Files::new(entries);
+    let files = Files::new(entries, names);
     let mut out = validate(&files);
     // Entries no part validation read are checked as XML alone.
     for (i, (name, xml)) in files.entries.iter().enumerate() {
@@ -403,6 +487,12 @@ pub fn check(bytes: &[u8]) -> Report {
     }
     if let Some((_, e)) = out.malformed {
         return Report { open_error: Some(e.description.clone()), errors: vec![e] };
+    }
+    if let Some(e) = out.open_error {
+        return Report { open_error: Some(e), errors: vec![] };
+    }
+    if let Some(e) = out.errors.iter().find(|e| e.error_type == "Open") {
+        return Report { open_error: Some(e.description.clone()), errors: vec![] };
     }
     // Every error: a caller matching the SDK wrapper keeps the first 50.
     Report { open_error: None, errors: out.errors }

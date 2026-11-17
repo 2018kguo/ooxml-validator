@@ -1,4 +1,4 @@
-// The oracle obstat is checked against: Microsoft's Open XML SDK validator
+// The oracle ooxml-validator is checked against: Microsoft's Open XML SDK validator
 // (FileFormatVersions.Microsoft365). Reads .docx paths on stdin, one per line;
 // writes one JSON object per path: {Path, Ok, OpenError, Errors: [{Id, Part,
 // Description, XPath, Node}]}. Every error is kept. Before the SDK opens the

@@ -4,6 +4,7 @@
 //! markup-compatibility-flattened child list, matched when it closes.
 
 use crate::names::names;
+use crate::strict;
 use crate::particle::{self, Kid, Verdict};
 use crate::schema::*;
 use crate::schema_gen::*;
@@ -29,10 +30,10 @@ pub struct ValidationError {
     pub error_type: &'static str,
 }
 
-/// OBSTAT_TRACE set: print each element's children and verdict.
+/// OOXML_VALIDATOR_TRACE set: print each element's children and verdict.
 fn trace() -> bool {
     static T: OnceLock<bool> = OnceLock::new();
-    *T.get_or_init(|| std::env::var_os("OBSTAT_TRACE").is_some())
+    *T.get_or_init(|| std::env::var_os("OOXML_VALIDATOR_TRACE").is_some())
 }
 
 /// A prefix packed into a u64: up to 7 bytes exactly (with the length), else
@@ -107,7 +108,9 @@ pub struct Part<'a> {
     frames: Vec<Frame<'a>>,
     /// Scratch, reused per element: present attributes (namespace id, local,
     /// value, name id, used) and declared attributes' values.
-    present: Vec<(u32, &'a [u8], &'a [u8], u32, bool)>,
+    present: Vec<(u32, &'a [u8], Cow<'a, [u8]>, u32, bool)>,
+    /// The package is Strict: namespaces and some values read as Transitional.
+    strict: bool,
     values: Vec<Option<Cow<'a, str>>>,
     kids: Vec<Kid>,
     text: String,
@@ -132,8 +135,9 @@ pub struct PartResult {
 }
 
 impl<'a> Part<'a> {
-    pub fn new(xml: &'a [u8], part: &'a str, rels: &'a Rels) -> Self {
+    pub fn new(xml: &'a [u8], part: &'a str, rels: &'a Rels, strict: bool) -> Self {
         Part {
+            strict,
             rels,
             unique: HashMap::new(),
             ac_mc: vec![],
@@ -178,6 +182,7 @@ impl<'a> Part<'a> {
     }
 
     fn ns_id(&mut self, uri: &'a [u8]) -> u32 {
+        let uri = strict::namespace(uri, self.strict).unwrap_or(uri);
         if let Some(&i) = ns_ids().get(uri) {
             return i;
         }
@@ -398,7 +403,8 @@ impl<'a> Part<'a> {
             if t.ns as u32 == ns && t.local.as_bytes() == local {
                 return Kind::Typed(root);
             }
-            self.error("Sch_InvalidRootElement", qname, format!("The root element '{qname}' is not expected here."));
+            // The SDK can't load such a part and aborts validation (InvalidDataException).
+            self.error_typed("root", qname, "Cannot load the root element from the part. The part contains invalid data.".into(), "Open");
             return Kind::Skip;
         };
         let is_mc = NAMESPACES.get(ns as usize).is_some_and(|u| u.as_bytes() == MC);
@@ -684,19 +690,31 @@ impl<'a> Part<'a> {
                 Some(i) => (self.lookup_id(&name[..i]).unwrap_or(0), &name[i + 1..]),
                 None => (0, name),
             };
-            present.push((ns, local, a.value, names().id(ns, local), false));
+            let value = Cow::Borrowed(strict::namespace(a.value, self.strict).unwrap_or(a.value));
+            present.push((ns, local, value, names().id(ns, local), false));
+        }
+        if self.strict
+            && let Some(k) = strict::class(t)
+        {
+            let mut raw: Vec<strict::Raw<'a>> = present.drain(..).map(|p| (p.0, p.1, p.2)).collect();
+            strict::translate(k, &mut raw);
+            present.extend(raw.into_iter().map(|(ns, l, v)| (ns, l, v, names().id(ns, l), false)));
         }
         for (k, a) in declared.iter().enumerate() {
             let aid = names().attr[s as usize + k];
             let value = present.iter_mut().find(|p| p.3 == aid).map(|p| {
                 p.4 = true;
-                unescape_in(p.2, true, clean)
+                match &p.2 {
+                    Cow::Borrowed(b) => unescape_in(b, true, clean),
+                    Cow::Owned(o) => Cow::Owned(String::from_utf8_lossy(o).into_owned()),
+                }
             });
             self.value(a.validators, a.value, a.enum_id, value.as_deref(), true, qname, a.local);
             values.push(value);
         }
         self.semantics(t, declared, &values, qname);
-        for &(ns, local, _, _, used) in &present {
+        for p in &present {
+            let (ns, local, used) = (p.0, p.1, p.4);
             if used {
                 continue;
             }
@@ -902,8 +920,8 @@ fn uri(s: &str) -> bool {
 }
 
 /// Validates a part's XML with `root` as its root type.
-pub fn validate_part(xml: &[u8], part: &str, root: u16, rels: &Rels) -> PartResult {
-    match Part::new(xml, part, rels).run(root) {
+pub fn validate_part(xml: &[u8], part: &str, root: u16, rels: &Rels, strict: bool) -> PartResult {
+    match Part::new(xml, part, rels, strict).run(root) {
         Ok(r) => r,
         Err(e) => PartResult {
             errors: vec![ValidationError { id: "xml_parse", description: e.message, part: part.to_string(), node: String::new(), error_type: "Xml" }],

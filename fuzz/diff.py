@@ -1,14 +1,14 @@
-"""Differential check: obstat vs the Open XML SDK on a list of .docx files.
+"""Differential check: ooxml-validator vs the Open XML SDK on a list of .docx files.
 
 usage: python3 fuzz/diff.py LIST OUT_DIR [--jobs N] [--schema]
-  LIST: one .docx path per line. OBSTAT is the obstat binary (default
-  target/release/obstat); ORACLE the built SDK oracle (default
+  LIST: one .docx path per line. OOXML_VALIDATOR is the ooxml-validator binary (default
+  target/release/ooxml-validator); ORACLE the built SDK oracle (default
   fuzz/oracle/bin/out/Oracle.dll: dotnet build -c Release -o bin/out there).
 
 Compares error ids over all parts; --schema leaves out the SDK's semantic
-(Sem_*) and package (Pkg_*) errors, which obstat does not check yet:
-  danger  obstat accepts what the SDK rejects   (must be zero)
-  extra   obstat rejects what the SDK accepts
+(Sem_*) and package (Pkg_*) errors, which ooxml-validator does not check yet:
+  danger  ooxml-validator accepts what the SDK rejects   (must be zero)
+  extra   ooxml-validator rejects what the SDK accepts
   ids     both reject, with different error id multisets
 """
 import collections, json, os, subprocess, sys, threading
@@ -29,7 +29,7 @@ def sdk(paths, dll, jobs):
     [t.start() for t in ts]; [t.join() for t in ts]
     return out
 
-def obstat(paths, binary):
+def validator(paths, binary):
     out = {}
     for i in range(0, len(paths), 500):
         res = subprocess.run([binary] + paths[i:i+500], capture_output=True, text=True).stdout
@@ -44,14 +44,19 @@ def main():
     jobs = int(sys.argv[sys.argv.index("--jobs") + 1]) if "--jobs" in sys.argv else 6
     here = os.path.dirname(os.path.abspath(__file__))
     s = sdk(paths, os.environ.get("ORACLE", os.path.join(here, "oracle/bin/out/Oracle.dll")), jobs)
-    p = obstat(paths, os.environ.get("OBSTAT", os.path.join(here, "../target/release/obstat")))
+    p = validator(paths, os.environ.get("OOXML_VALIDATOR", os.path.join(here, "../target/release/ooxml-validator")))
     counts = collections.Counter(); rows = []
     for path in paths:
         a, b = s.get(path), p.get(path)
         if a is None or b is None:
             counts["missing"] += 1; continue
         if a.get("OpenError") and not a.get("Errors"):
-            counts["sdk-open-error"] += 1; continue
+            # The SDK could not open it: we must reject it too.
+            kind = "agree-open" if not b["ok"] else "danger"
+            counts[kind] += 1
+            if kind == "danger":
+                rows.append({"kind": kind, "path": path, "sdk": ["open: " + a["OpenError"][:200]], "ooxml-validator": []})
+            continue
         sdk_ids = sorted(e["Id"] for e in a["Errors"] if not (schema_only and e["Id"].startswith(("Sem_", "Pkg_"))))
         mine = sorted(b["ids"])
         if not sdk_ids and not mine: kind = "agree-ok"
@@ -62,7 +67,7 @@ def main():
         counts[kind] += 1
         if kind in ("danger", "extra", "ids"):
             first = next((e for e in a["Errors"] if e["Id"] in set(sdk_ids) - set(mine)), a["Errors"][0] if a["Errors"] else None)
-            rows.append({"kind": kind, "path": path, "sdk": sorted(set(sdk_ids)), "obstat": sorted(set(mine)),
+            rows.append({"kind": kind, "path": path, "sdk": sorted(set(sdk_ids)), "ooxml-validator": sorted(set(mine)),
                          "sdk_first": first and (first.get("Part"), first.get("Node"), first.get("Description", "")[:200], first.get("XPath")), "proof_first": b.get("first", "")[:200]})
     json.dump(rows, open(os.path.join(outdir, "diffs.json"), "w"), indent=1)
     print(dict(counts))

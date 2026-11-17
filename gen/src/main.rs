@@ -350,8 +350,18 @@ fn main() {
             chain.push(b);
         }
         let astart = nattrs;
-        for &c in chain.iter().rev() {
-            for a in types[&names[c]]["Attributes"].as_array().into_iter().flatten() {
+        let mut lists: Vec<Value> = vec![];
+        // The one hand-written base with metadata (CustomXmlElement.cs): an
+        // unprefixed uri, and w:element as an NCName.
+        if types[&names[*chain.last().unwrap()]]["BaseClass"].as_str() == Some("CustomXmlElement") {
+            lists.push(serde_json::json!([
+                {"QName": ":uri", "Type": "StringValue"},
+                {"QName": "w:element", "Type": "StringValue", "Validators": [{"Name": "StringValidator", "Arguments": [{"Type": "Boolean", "Name": "IsNcName", "Value": "True"}]}]},
+            ]));
+        }
+        lists.extend(chain.iter().rev().map(|&c| types[&names[c]]["Attributes"].clone()));
+        for list in &lists {
+            for a in list.as_array().into_iter().flatten() {
                 let (ns, local) = out.qname(a["QName"].as_str().unwrap());
                 let (vs, vn) = emit_validators(a.get("Validators"), &mut out, &mut enum_ids, &mut patterns);
                 let value = a["Type"].as_str().unwrap();
@@ -507,6 +517,59 @@ fn main() {
         enum_rows[i as usize] = format!("    ({name:?}, &{values:?}),");
     }
     writeln!(s, "pub static ENUMS: [(&str, &[&str]); {}] = [\n{}\n];", enum_rows.len(), enum_rows.join("\n")).unwrap();
+    // Strict (ISO 29500) documents: the SDK reads them as Transitional. Its
+    // namespace resolver's pair tables, and the Word classes that also map
+    // attribute values (StrictTranslateAttribute).
+    let resolver = std::fs::read_to_string(sdk.join("src/DocumentFormat.OpenXml.Framework/Features/OpenXmlNamespaceResolver.cs")).unwrap();
+    let pairs = |text: &str| -> Vec<(String, String)> {
+        let mut v = vec![];
+        let mut rest = text;
+        while let Some(i) = rest.find("{ \"") {
+            let (a, r) = cs_string(rest[i + 2..].trim_start());
+            let (b, r) = cs_string(r.trim_start().trim_start_matches(',').trim_start());
+            v.push((a, b));
+            rest = r;
+        }
+        v
+    };
+    for (table, start) in [("EXTENDED_NAMESPACES", "_extendedNamespaces = new()"), ("STRICT_NAMESPACES", "_strictTransitionalNamespaces = new()"), ("STRICT_RELATIONSHIPS", "_strictTransitionalRelationshipPairs = new()")] {
+        let from = resolver.find(start).unwrap_or_else(|| panic!("{start}"));
+        let body = &resolver[from..from + resolver[from..].find("};").unwrap()];
+        let v = pairs(body);
+        assert!(!v.is_empty(), "{table}");
+        writeln!(s, "pub static {table}: [(&str, &str); {}] = {v:?};\n", v.len()).unwrap();
+    }
+    // Hand-written classes with their own metadata: only CustomXmlElement,
+    // ported above. Another one in an SDK release stops generation.
+    let mut handwritten = vec![];
+    for f in std::fs::read_dir(sdk.join("src/DocumentFormat.OpenXml/Schema")).unwrap().flat_map(|d| std::fs::read_dir(d.unwrap().path()).into_iter().flatten()) {
+        let path = f.unwrap().path();
+        if std::fs::read_to_string(&path).unwrap_or_default().contains("void ConfigureMetadata(") {
+            handwritten.push(path.file_name().unwrap().to_string_lossy().into_owned());
+        }
+    }
+    assert_eq!(handwritten, ["CustomXmlElement.cs"], "hand-written element metadata changed in the SDK: port it in gen");
+    // Classes that rewrite their attributes when the package is Strict. Their
+    // logic is ported by hand in src/strict.rs; a new or removed one in an SDK
+    // release stops generation, so the port can't drift silently.
+    const STRICT_CLASSES: [&str; 9] = ["ConditionalFormatStyle", "Document", "Indentation", "Justification", "StylePaneSortMethods", "TabStop", "TableJustification", "TableLook", "TextDirection"];
+    let mut found = vec![];
+    for f in std::fs::read_dir(sdk.join("src/DocumentFormat.OpenXml/Schema/Wordprocessing")).unwrap() {
+        let text = std::fs::read_to_string(f.unwrap().path()).unwrap();
+        if text.contains("override bool StrictTranslateAttribute") {
+            found.push(text.split("public partial class ").nth(1).unwrap().split_whitespace().next().unwrap().to_string());
+        }
+    }
+    found.sort();
+    assert_eq!(found, STRICT_CLASSES, "the SDK's Strict attribute translations changed: update src/strict.rs and STRICT_CLASSES");
+    let mut strict_types = vec![];
+    for ((stem, class), tys) in &file_class {
+        if stem.contains("wordprocessingml_2006_main") && let Some(k) = STRICT_CLASSES.iter().position(|c| c == class) {
+            strict_types.extend(tys.iter().map(|t| format!("    ({t:?}, {k}),")));
+        }
+    }
+    strict_types.sort();
+    writeln!(s, "/// (type name, index in strict::CLASSES)\npub static STRICT_TYPES: [(&str, u8); {}] = [\n{}\n];", strict_types.len(), strict_types.join("\n")).unwrap();
     std::fs::write(&args[2], s).unwrap();
     eprintln!("{} types, {nattrs} attrs, {nchildren} children, {nparticles} particles, {nvalidators} validators, {} patterns, {} enums",
         names.len(), patterns.len(), enum_ids.len());

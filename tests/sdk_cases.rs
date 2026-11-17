@@ -1,16 +1,24 @@
 //! Small documents with the error ids the Open XML SDK 3.5.1 reports for them
 //! (recorded with fuzz/oracle). Each pins a behavior a fuzzing or corpus run
-//! once found obstat getting wrong, or a rule easy to break.
+//! once found ooxml-validator getting wrong, or a rule easy to break.
 
 use std::io::Write;
 
+const TRANSITIONAL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
+const STRICT: &str = "http://purl.oclc.org/ooxml/officeDocument/relationships/officeDocument";
+
 fn docx(document: &str) -> Vec<u8> {
+    docx_rel(TRANSITIONAL, document)
+}
+
+fn docx_rel(rel: &str, document: &str) -> Vec<u8> {
+    let rels = format!(r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{rel}" Target="word/document.xml"/></Relationships>"#);
     let mut out = std::io::Cursor::new(Vec::new());
     let mut z = zip::ZipWriter::new(&mut out);
     let o = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
     let files = [
         ("[Content_Types].xml", r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#),
-        ("_rels/.rels", r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#),
+        ("_rels/.rels", rels.as_str()),
         ("word/document.xml", document),
     ];
     for (name, body) in files {
@@ -22,7 +30,7 @@ fn docx(document: &str) -> Vec<u8> {
 }
 
 fn ids(document: &str) -> Vec<&'static str> {
-    let mut v: Vec<&'static str> = obstat::package::check(&docx(document)).errors.iter().map(|e| e.id).collect();
+    let mut v: Vec<&'static str> = ooxml_validator::package::check(&docx(document)).errors.iter().map(|e| e.id).collect();
     v.sort();
     v.dedup();
     v
@@ -93,3 +101,69 @@ fn xml_space() {
     assert_eq!(ids(r#"<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:zz="urn:example:zz" ><w:body><w:p><w:r><w:t xml:space="t">x</w:t></w:r></w:p></w:body></w:document>"#), ["xml_parse"]);
 }
 
+
+const W: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#;
+const STRICT_BODY: &str = r#"<w:body><w:p><w:pPr><w:ind w:left="720"/><w:jc w:val="start"/></w:pPr></w:p><w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblLook w:firstRow="1" w:noVBand="1"/></w:tblPr><w:tblGrid><w:gridCol w:w="100"/></w:tblGrid><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl></w:body>"#;
+
+#[test]
+fn strict_reads_as_transitional() {
+    let doc = format!(r#"<w:document xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main" w:conformance="strict">{STRICT_BODY}</w:document>"#);
+    assert!(ooxml_validator::package::check(&docx_rel(STRICT, &doc)).ok());
+}
+
+#[test]
+fn strict_part_under_transitional_rel_cannot_load() {
+    // The SDK translates namespaces only once a Strict relationship is found;
+    // otherwise the root is unknown and loading the part throws.
+    let doc = format!(r#"<w:document xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main">{STRICT_BODY}</w:document>"#);
+    assert!(ooxml_validator::package::check(&docx_rel(TRANSITIONAL, &doc)).open_error.is_some());
+}
+
+#[test]
+fn custom_xml_attributes() {
+    // CustomXmlElement (hand-written in the SDK): an unprefixed uri, w:element an NCName.
+    let doc = |attrs: &str| format!(r#"<w:document {W}><w:body><w:customXml {attrs}><w:p/></w:customXml></w:body></w:document>"#);
+    assert_eq!(ids(&doc(r#"uri="urn:x" w:element="a""#)), Vec::<&str>::new());
+    assert_eq!(ids(&doc(r#"w:uri="urn:x" w:element="a""#)), ["Sch_UndeclaredAttribute"]);
+    assert_eq!(ids(&doc(r#"w:element="1bad""#)), ["Sch_AttributeValueDataTypeDetailed"]);
+}
+
+/// A package with a styles part, after `edit` rewrites (part name, text) pairs.
+fn with_styles(edit: impl Fn(&str, String) -> String) -> Vec<u8> {
+    const CT: &str = r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>"#;
+    let files = [
+        ("[Content_Types].xml", CT.to_string()),
+        ("_rels/.rels", format!(r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{TRANSITIONAL}" Target="word/document.xml"/></Relationships>"#)),
+        ("word/_rels/document.xml.rels", r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#.to_string()),
+        ("word/document.xml", format!(r#"<w:document {W}><w:body><w:p/></w:body></w:document>"#)),
+        ("word/styles.xml", format!(r#"<w:styles {W}/>"#)),
+    ];
+    let mut out = std::io::Cursor::new(Vec::new());
+    let mut z = zip::ZipWriter::new(&mut out);
+    for (name, body) in files {
+        z.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+        z.write_all(edit(name, body).as_bytes()).unwrap();
+    }
+    z.finish().unwrap();
+    out.into_inner()
+}
+
+#[test]
+fn package_load_failures_are_open_errors() {
+    // What the SDK throws while loading parts, each checked against the oracle.
+    let opens = |edit: &dyn Fn(&str, String) -> String| ooxml_validator::package::check(&with_styles(edit)).open_error.is_some();
+    let rels = |add: &'static str| move |n: &str, b: String| if n == "word/_rels/document.xml.rels" { b.replace("</Relationships>", &format!("{add}</Relationships>")) } else { b };
+    assert!(!opens(&|_, b| b));
+    // Missing target, and content types: wrong, or an Override whose case differs.
+    assert!(opens(&|n, b| if n.ends_with(".rels") { b.replace(r#"Target="styles.xml""#, r#"Target="none.xml""#) } else { b }));
+    assert!(opens(&|n, b| if n == "[Content_Types].xml" { b.replace("wordprocessingml.styles+xml", "foo+xml") } else { b }));
+    assert!(opens(&|n, b| if n == "[Content_Types].xml" { b.replace("/word/styles.xml", "/WORD/Styles.xml") } else { b }));
+    // A target named in another case is the same part.
+    assert!(!opens(&|n, b| if n.ends_with(".rels") { b.replace(r#"Target="styles.xml""#, r#"Target="STYLES.XML""#) } else { b }));
+    // One part under two relationship types; a missing image.
+    assert!(opens(&rels(r#"<Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="styles.xml"/>"#)));
+    assert!(opens(&rels(r#"<Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/none.png"/>"#)));
+    // Hyperlinks and NULL targets load nothing.
+    assert!(!opens(&rels(r#"<Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="nowhere.xml"/>"#)));
+    assert!(!opens(&rels(r#"<Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="NULL"/>"#)));
+}

@@ -1,5 +1,5 @@
 [package]
-name = "obstat"
+name = "ooxml-validator"
 version = "0.1.0"
 license = "MIT"
 description = "A streaming .docx validator that gives the Open XML SDK's verdicts"

@@ -8,7 +8,7 @@ fn main() {
     let mut errors = 0;
     for _ in 0..n {
         let t = std::time::Instant::now();
-        errors = obstat::package::check(&bytes).errors.len();
+        errors = ooxml_validator::package::check(&bytes).errors.len();
         times.push(t.elapsed());
     }
     times.sort();
