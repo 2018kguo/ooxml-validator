@@ -239,14 +239,20 @@ impl Ctx<'_> {
     }
 }
 
+/// GetRequiredElements(null) != empty, precomputed per particle.
 pub fn required(id: u32) -> bool {
+    static R: std::sync::OnceLock<Vec<bool>> = std::sync::OnceLock::new();
+    R.get_or_init(|| (0..PARTICLES.len() as u32).map(required_slow).collect())[id as usize]
+}
+
+fn required_slow(id: u32) -> bool {
     let q = p(id);
     match q.kind {
         ParticleKind::Element | ParticleKind::Any => q.min > 0,
         // Choice: required only if every alternative requires something.
-        ParticleKind::Choice => q.min > 0 && q.items.iter().all(|&c| required(c)),
+        ParticleKind::Choice => q.min > 0 && q.items.iter().all(|&c| required_slow(c)),
         // Sequence, Group, All (CompositeParticleValidator): any child requires.
-        _ => q.min > 0 && q.items.iter().any(|&c| required(c)),
+        _ => q.min > 0 && q.items.iter().any(|&c| required_slow(c)),
     }
 }
 
