@@ -59,6 +59,7 @@ def build(name, body=None, parts=None, rels_extra="", ct_extra="", raw=None, dro
                 z.writestr(k, v if isinstance(v, bytes) else v.encode())
 
 
+NS_PROCESS = NS.replace('mc:Ignorable="w14 w15"', 'xmlns:ex="urn:example:ex" mc:Ignorable="w14 w15 ex" mc:ProcessContent="ex:wrap"')
 P = lambda inner: f"<w:p>{inner}</w:p>"
 R = lambda rpr="", t="x": f"<w:r>{f'<w:rPr>{rpr}</w:rPr>' if rpr else ''}<w:t>{t}</w:t></w:r>"
 TBL = lambda tcpr="", tblpr='<w:tblW w:w="0" w:type="auto"/>', grid='<w:gridCol w:w="2000"/>', trpr="": f'<w:tbl><w:tblPr>{tblpr}</w:tblPr><w:tblGrid>{grid}</w:tblGrid><w:tr>{trpr}<w:tc>{f"<w:tcPr>{tcpr}</w:tcPr>" if tcpr else ""}<w:p/></w:tc></w:tr></w:tbl>'
@@ -134,6 +135,16 @@ cases = {
     # 32-39 namespaces and well-formedness
     "32_ignorable_undeclared": dict(doc_xml=f'{XML}<w:document xmlns:w="{W}" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="w14 wp14"><w:body><w:p/></w:body></w:document>'),
     "33_foreign_attr": dict(doc_xml=doc('<w:p xmlns:ex="urn:example:ex" ex:id="p1"/>')),
+    # AlternateContent inside an ignorable element whose content is processed:
+    # a selected Choice's content is dropped, a selected Fallback's joins the
+    # parent as unknown elements, and the AlternateContent itself is checked.
+    **{f"34_ac_in_processed_{k}": dict(parts={"word/settings.xml": f'{XML}<w:settings {NS_PROCESS}><w:defaultTabStop w:val="720"/><ex:wrap>{v}</ex:wrap></w:settings>'})
+       for k, v in {
+           "choice_ok": '<mc:AlternateContent><mc:Choice Requires="w14"><w:zoom w:percent="100"/></mc:Choice></mc:AlternateContent>',
+           "fallback": '<mc:AlternateContent><mc:Choice Requires="ex"><w:zoom w:percent="100"/></mc:Choice><mc:Fallback><w:characterSpacingControl w:val="doNotCompress"/></mc:Fallback></mc:AlternateContent>',
+           "empty": '<mc:AlternateContent/>',
+           "fallback_first": '<mc:AlternateContent><mc:Fallback/><mc:Choice Requires="w14"/></mc:AlternateContent>',
+       }.items()},
     "33_foreign_attr_ignorable_ok": dict(doc_xml=doc('<w:p/>').replace('mc:Ignorable="w14 w15"', 'xmlns:ex="urn:example:ex" mc:Ignorable="w14 w15 ex"').replace("<w:p/>", '<w:p ex:id="p1"/>')),
     "35_undeclared_prefix": dict(doc_xml=f'{XML}<w:document xmlns:w="{W}"><w:body><w:p w14:paraId="1234ABCD"/></w:body></w:document>'),
     "36_aliased_dup_attr": dict(doc_xml=f'{XML}<w:document xmlns:w="{W}"><w:body xmlns:x="urn:a" xmlns:y="urn:a" x:id="1" y:id="2"><w:p/></w:body></w:document>'),

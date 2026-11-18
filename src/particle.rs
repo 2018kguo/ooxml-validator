@@ -53,6 +53,13 @@ impl Ctx<'_> {
 
     pub fn try_match(&self, id: u32, start: usize) -> Info {
         let q = p(id);
+        // A particle matches at a child only if some element below it is that
+        // child's type; with no Any below, skip the walk when none is.
+        if let (Some(ty), Some(first)) = (self.ty(start), firsts(id)) {
+            if first.binary_search(&ty).is_err() {
+                return Info { m: Match::No, last: None };
+            }
+        }
         match q.kind {
             ParticleKind::Element => self.element(q, start),
             ParticleKind::Any => self.any(q, start),
@@ -237,6 +244,42 @@ impl Ctx<'_> {
     pub fn required(&self, id: u32) -> bool {
         required(id)
     }
+}
+
+/// The element types below a particle, sorted; None if an Any is below it
+/// (any child might match).
+fn firsts(id: u32) -> Option<&'static [u16]> {
+    static F: std::sync::OnceLock<(Vec<u16>, Vec<(u32, u32)>)> = std::sync::OnceLock::new();
+    let (flat, ranges) = F.get_or_init(|| {
+        fn collect(id: u32, out: &mut Vec<u16>) -> bool {
+            let q = p(id);
+            match q.kind {
+                ParticleKind::Element => {
+                    out.push(q.element);
+                    true
+                }
+                ParticleKind::Any => false,
+                _ => q.items.iter().all(|&c| collect(c, out)),
+            }
+        }
+        let mut flat = vec![];
+        let mut ranges = Vec::with_capacity(PARTICLES.len());
+        let mut set = vec![];
+        for id in 0..PARTICLES.len() as u32 {
+            set.clear();
+            if collect(id, &mut set) {
+                set.sort_unstable();
+                set.dedup();
+                ranges.push((flat.len() as u32, set.len() as u32));
+                flat.extend_from_slice(&set);
+            } else {
+                ranges.push((u32::MAX, 0));
+            }
+        }
+        (flat, ranges)
+    });
+    let (start, len) = ranges[id as usize];
+    (start != u32::MAX).then(|| &flat[start as usize..(start + len) as usize])
 }
 
 /// GetRequiredElements(null) != empty, precomputed per particle.

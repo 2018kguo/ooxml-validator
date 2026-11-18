@@ -83,8 +83,10 @@ enum Kind {
     Transparent,
     /// mc:AlternateContent; `chosen` once a branch is selected; `state` is
     /// AlternateContentValidator's (0 start, 1 after a Choice, 2 after the
-    /// Fallback); `count` its element children.
-    Alternate { chosen: bool, state: u8, count: u16 },
+    /// Fallback); `count` its element children; `opaque` inside an ignorable
+    /// element whose content is processed, where the SDK drops a selected
+    /// Choice's content and takes a selected Fallback's as unknown elements.
+    Alternate { chosen: bool, state: u8, count: u16, opaque: bool },
     /// An ignorable element whose content is processed: its children join
     /// the nearest typed ancestor's, as unknown elements.
     Opaque,
@@ -374,10 +376,9 @@ impl<'a> Part<'a> {
         if !self.frames.is_empty() && !matches!(kind, Kind::Transparent | Kind::Alternate { .. }) {
             *self.facts.counts.entry(None).or_default() += 1;
             if let Some(Frame { kind: Kind::Typed(p), .. }) = self.frames.last() {
-                let pt = &TYPES[*p as usize];
-                let key = Some((pt.ns, pt.local));
-                if semantic::targets().1.contains(&key) {
-                    *self.facts.counts.entry(key).or_default() += 1;
+                if semantic::type_flags(*p).1 {
+                    let pt = &TYPES[*p as usize];
+                    *self.facts.counts.entry(Some((pt.ns, pt.local))).or_default() += 1;
                 }
             }
         }
@@ -425,7 +426,7 @@ impl<'a> Part<'a> {
         let is_mc = NAMESPACES.get(ns as usize).is_some_and(|u| u.as_bytes() == MC);
         // Inside AlternateContent: check its shape as AlternateContentValidator
         // does, and pick the branch as GetContentFromACBlock does.
-        if let Kind::Alternate { chosen, state, count } = parent.kind {
+        if let Kind::Alternate { chosen, state, count, opaque } = parent.kind {
             let ac = self.frame_name(self.frames.len() - 1).to_string();
             let choice = is_mc && local == b"Choice";
             let fallback = is_mc && local == b"Fallback";
@@ -454,17 +455,25 @@ impl<'a> Part<'a> {
                 b"Fallback" => !chosen,
                 _ => false,
             };
-            if let Some(Frame { kind: Kind::Alternate { chosen, state, count: c }, .. }) = self.frames.last_mut() {
+            if let Some(Frame { kind: Kind::Alternate { chosen, state, count: c, .. }, .. }) = self.frames.last_mut() {
                 *chosen |= selected;
                 *state = next;
                 *c = count + 1;
             }
-            return if selected { Kind::Transparent } else { Kind::Skip };
+            return match (selected, opaque) {
+                (false, _) => Kind::Skip,
+                (true, false) => Kind::Transparent,
+                (true, true) if local == b"Choice" => Kind::Skip,
+                (true, true) => Kind::Opaque,
+            };
         }
         // Inside an ignorable element whose content is processed: unknown
         // elements, inlined into the nearest typed ancestor's children.
         if parent.kind == Kind::Opaque {
             let Some((_, owner_ty)) = self.owner() else { return Kind::Skip };
+            if is_mc && local == b"AlternateContent" {
+                return Kind::Alternate { chosen: false, state: 0, count: 0, opaque: true };
+            }
             if self.ignorable(ns) {
                 return if self.process_content(ns, local) { Kind::Opaque } else { Kind::Skip };
             }
@@ -505,7 +514,7 @@ impl<'a> Part<'a> {
             }
         }
         if is_mc && local == b"AlternateContent" {
-            return Kind::Alternate { chosen: false, state: 0, count: 0 };
+            return Kind::Alternate { chosen: false, state: 0, count: 0, opaque: false };
         }
         if self.ignorable(ns) {
             return if self.process_content(ns, local) { Kind::Opaque } else { Kind::Skip };
@@ -764,11 +773,11 @@ impl<'a> Part<'a> {
     /// The type's semantic constraints, and the values other parts may refer to.
     fn semantics(&mut self, t: u16, declared: &'static [Attr], values: &[Option<Cow<'a, str>>], qname: &str) {
         let ty = &TYPES[t as usize];
-        if ty.constraints.1 == 0 && !semantic::is_target(ty.ns, ty.local) {
+        if ty.constraints.1 == 0 && !semantic::type_flags(t).0 {
             return;
         }
         let seen: Vec<Seen> = declared.iter().zip(values).map(|(attr, v)| Seen { attr, value: v.as_deref() }).collect();
-        for &(ens, el, attr) in &semantic::targets().0 {
+        for &(ens, el, attr) in semantic::targets().0.iter().filter(|_| semantic::type_flags(t).0) {
             if ens == ty.ns && el == ty.local
                 && let Some(v) = semantic::find(&seen, (0, attr)).and_then(|s| s.value).filter(|v| !v.is_empty())
             {

@@ -52,6 +52,15 @@ pub fn is_target(ns: u16, local: &str) -> bool {
     targets().0.iter().any(|t| t.0 == ns && t.1 == local)
 }
 
+/// Per schema type: (another part may refer to its values, IndexReference
+/// counts the children of elements of this type). Looked up once per element.
+pub fn type_flags(t: u16) -> (bool, bool) {
+    static F: OnceLock<Vec<(bool, bool)>> = OnceLock::new();
+    F.get_or_init(|| {
+        crate::schema_gen::TYPES.iter().map(|ty| (is_target(ty.ns, ty.local), targets().1.contains(&Some((ty.ns, ty.local))))).collect()
+    })[t as usize]
+}
+
 pub fn targets() -> &'static (HashSet<(u16, &'static str, &'static str)>, HashSet<Option<(u16, &'static str)>>) {
     static T: OnceLock<(HashSet<(u16, &'static str, &'static str)>, HashSet<Option<(u16, &'static str)>>)> = OnceLock::new();
     T.get_or_init(|| {
