@@ -1,5 +1,6 @@
 // The oracle ooxml-validator is checked against: Microsoft's Open XML SDK validator
-// (FileFormatVersions.Microsoft365). Reads .docx paths on stdin, one per line;
+// (FileFormatVersions.Microsoft365). Reads .docx, .xlsx and .pptx paths on stdin,
+// one per line, and opens each as the package class its extension names;
 // writes one JSON object per path: {Path, Ok, OpenError, Errors: [{Id, Part,
 // Description, XPath, Node}]}. Every error is kept. Before the SDK opens the
 // package, each .xml and .rels entry must load as XML (XmlReader with DTDs
@@ -46,7 +47,12 @@ Dictionary<string, object?> Validate(string path)
                 }
             }
         }
-        using var doc = WordprocessingDocument.Open(new MemoryStream(bytes), false);
+        using OpenXmlPackage doc = Path.GetExtension(path).ToLowerInvariant() switch
+        {
+            ".xlsx" or ".xlsm" or ".xltx" or ".xltm" or ".xlam" => SpreadsheetDocument.Open(new MemoryStream(bytes), false),
+            ".pptx" or ".pptm" or ".potx" or ".potm" or ".ppsx" or ".ppsm" or ".ppam" => PresentationDocument.Open(new MemoryStream(bytes), false),
+            _ => WordprocessingDocument.Open(new MemoryStream(bytes), false),
+        };
         foreach (var e in validator.Validate(doc))
         {
             errors.Add(new { e.Id, Part = e.Part?.Uri.ToString(), e.Description, e.Path?.XPath, Node = e.Node?.LocalName });

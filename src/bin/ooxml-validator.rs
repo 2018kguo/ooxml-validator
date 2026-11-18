@@ -1,6 +1,8 @@
-//! ooxml-validator [--json] [--max-errors N] FILE.docx...
+//! ooxml-validator [--json] [--max-errors N] FILE.docx|.xlsx|.pptx...
 //!
-//! Validates each document as Microsoft's Open XML SDK validator would and
+//! Validates each document as Microsoft's Open XML SDK validator would (as a
+//! Word, Excel or PowerPoint package by its extension; by its main part's
+//! content type when the extension names none) and
 //! prints its errors; exits 1 if any document is invalid. --json prints one
 //! object per file: {"path","ok","openError","errors":[{"id","description",
 //! "part","node","errorType"}]}. --max-errors caps each file's list (default
@@ -27,7 +29,8 @@ fn main() {
     let mut all_ok = true;
     for path in paths {
         let report = match std::fs::read(&path) {
-            Ok(bytes) => ooxml_validator::check(&bytes),
+            // Opened as the package class its extension names, as a caller of the SDK would.
+            Ok(bytes) => ooxml_validator::check_as(&bytes, ooxml_validator::Format::from_extension(&path)),
             Err(e) => ooxml_validator::Report { open_error: Some(e.to_string()), errors: vec![] },
         };
         all_ok &= report.ok();
@@ -51,6 +54,6 @@ fn main() {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: ooxml-validator [--json] [--max-errors N] FILE.docx...");
+    eprintln!("usage: ooxml-validator [--json] [--max-errors N] FILE.docx|.xlsx|.pptx...");
     std::process::exit(2);
 }

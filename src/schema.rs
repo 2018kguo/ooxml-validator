@@ -40,6 +40,9 @@ pub struct PartClass {
     pub version: u8,
     /// Child part classes, as PART_CHILDREN ranges.
     pub children: (u16, u16),
+    /// Data parts its relationships may reference (IKnownDataPartFeature):
+    /// audio 1, video 2, media 4.
+    pub data: u8,
 }
 
 /// A part class a container may hold (its IPartConstraintFeature rule).
@@ -177,5 +180,7 @@ pub enum ConstraintKind {
 
 pub struct Constraint {
     pub kind: ConstraintKind,
+    /// The applications it runs for (ApplicationType): Word 1, Excel 2, PowerPoint 4.
+    pub apps: u8,
     pub args: &'static [Arg],
 }

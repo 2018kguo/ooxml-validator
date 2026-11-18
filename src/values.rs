@@ -112,7 +112,8 @@ fn date_time(s: &str) -> bool {
             while t.get(i).is_some_and(u8::is_ascii_digit) {
                 i += 1;
             }
-            if i == start || i - start > 7 {
+            // Any number of digits: XsdDateTime keeps seven and rounds the rest.
+            if i == start {
                 return false;
             }
         }
@@ -226,5 +227,176 @@ mod tests {
         assert!(is_valid(HexBinaryValue, 0, "00A1") && !is_valid(HexBinaryValue, 0, "0A1"));
         assert!(is_valid(DateTimeValue, 0, "2026-11-17T12:00:00Z") && is_valid(DateTimeValue, 0, "2026-11-17") && !is_valid(DateTimeValue, 0, "17/11/2026"));
         assert!(!is_valid(Int32Value, 0, ""));
+    }
+}
+
+/// What CellType's validator (Schema/Spreadsheet/CellType.cs) requires of a
+/// cell's `x:v` text for its `t`: a Boolean is exactly 0, 1, true or false;
+/// a Number parses as a double, an int or a decimal; a Date is an ISO time
+/// with milliseconds, with or without an offset (CellValue.TryGet*).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CellKind {
+    Boolean,
+    Number,
+    Date,
+}
+
+pub fn cell_value(kind: CellKind, s: &str) -> bool {
+    match kind {
+        CellKind::Boolean => matches!(s, "0" | "1" | "true" | "false"),
+        CellKind::Number => number_styles(s) || special_double(s),
+        CellKind::Date => cell_date(s),
+    }
+}
+
+/// Whitespace as .NET number parsing allows it (IsWhite): tab to CR, space.
+fn white(c: u8) -> bool {
+    c == b' ' || (0x09..=0x0d).contains(&c)
+}
+
+/// double.TryParse(s, NumberStyles.Number | AllowExponent, Invariant)'s
+/// grammar (Number.Parsing ParseNumber): whitespace, a sign, digits with
+/// thousands separators after the first, a point, an exponent, then a sign
+/// if none came first, and whitespace. An overflow parses (as infinity), so
+/// the grammar is the answer; int and decimal accept nothing more.
+fn number_styles(s: &str) -> bool {
+    let b = s.as_bytes();
+    let mut i = 0;
+    let mut sign = false;
+    // Leading whitespace, then at most one sign (no whitespace after it).
+    loop {
+        match b.get(i) {
+            Some(&c) if white(c) && !sign => i += 1,
+            Some(b'+' | b'-') if !sign => {
+                sign = true;
+                i += 1;
+            }
+            _ => break,
+        }
+    }
+    let mut digits = false;
+    let mut point = false;
+    loop {
+        match b.get(i) {
+            Some(c) if c.is_ascii_digit() => {
+                digits = true;
+                i += 1;
+            }
+            Some(b',') if digits && !point => i += 1,
+            Some(b'.') if !point => {
+                point = true;
+                i += 1;
+            }
+            _ => break,
+        }
+    }
+    if !digits {
+        return false;
+    }
+    // An exponent needs digits; without them the 'e' is left unparsed.
+    if matches!(b.get(i), Some(b'e' | b'E')) {
+        let mut j = i + 1;
+        if matches!(b.get(j), Some(b'+' | b'-')) {
+            j += 1;
+        }
+        if b.get(j).is_some_and(u8::is_ascii_digit) {
+            while b.get(j).is_some_and(u8::is_ascii_digit) {
+                j += 1;
+            }
+            i = j;
+        }
+    }
+    // Trailing whitespace and one sign, if none led.
+    while let Some(&c) = b.get(i) {
+        if white(c) {
+            i += 1;
+        } else if (c == b'+' || c == b'-') && !sign {
+            sign = true;
+            i += 1;
+        } else if c == 0 {
+            i += 1;
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+/// Number.TryParseFloat's fallback: the invariant infinity and NaN symbols,
+/// without case, around String.Trim's whitespace.
+fn special_double(s: &str) -> bool {
+    let t = s.trim();
+    let is = |x: &str, w: &str| x.eq_ignore_ascii_case(w);
+    if is(t, "Infinity") || is(t, "-Infinity") || is(t, "NaN") {
+        return true;
+    }
+    if let Some(r) = t.strip_prefix('+') {
+        return is(r, "Infinity") || is(r, "NaN");
+    }
+    t.strip_prefix('-').is_some_and(|r| is(r, "NaN"))
+}
+
+/// DateTime.TryParseExact(s, "yyyy-MM-ddTHH:mm:ss.fff") or DateTimeOffset's
+/// with "zzz" after it (a sign, 1-2 digit hours, an optional colon, 2 digit
+/// minutes, within 14 hours), DateTimeStyles.None.
+fn cell_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() < 23 {
+        return false;
+    }
+    let n = |r: std::ops::Range<usize>| -> Option<u32> {
+        let d = b.get(r)?;
+        d.iter().all(u8::is_ascii_digit).then(|| d.iter().fold(0, |a, c| a * 10 + (c - b'0') as u32))
+    };
+    let at = |i: usize, c: u8| b.get(i) == Some(&c);
+    let (Some(y), Some(mo), Some(d), Some(h), Some(mi), Some(se), Some(_)) = (n(0..4), n(5..7), n(8..10), n(11..13), n(14..16), n(17..19), n(20..23)) else { return false };
+    if !(at(4, b'-') && at(7, b'-') && at(10, b'T') && at(13, b':') && at(16, b':') && at(19, b'.')) {
+        return false;
+    }
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if y == 0 || !(1..=12).contains(&mo) || d == 0 || d > days[mo as usize - 1] || h > 23 || mi > 59 || se > 59 {
+        return false;
+    }
+    let rest = &b[23..];
+    if rest.is_empty() {
+        return true;
+    }
+    if !matches!(rest[0], b'+' | b'-') {
+        return false;
+    }
+    let digits = |r: &[u8]| r.iter().all(u8::is_ascii_digit);
+    let (hours, minutes) = match &rest[1..] {
+        [h, b':', m @ ..] | [h, m @ ..] if m.len() == 2 && h.is_ascii_digit() => (vec![*h], m.to_vec()),
+        [h1, h2, b':', m @ ..] | [h1, h2, m @ ..] if m.len() == 2 && h1.is_ascii_digit() && h2.is_ascii_digit() => (vec![*h1, *h2], m.to_vec()),
+        _ => return false,
+    };
+    if !digits(&minutes) {
+        return false;
+    }
+    let hv = hours.iter().fold(0u32, |a, c| a * 10 + (c - b'0') as u32);
+    let mv = (minutes[0] - b'0') as u32 * 10 + (minutes[1] - b'0') as u32;
+    mv < 60 && hv * 60 + mv <= 14 * 60
+}
+
+#[cfg(test)]
+mod cell_tests {
+    use super::*;
+
+    #[test]
+    fn cell_values_as_the_sdk_parses_them() {
+        for ok in ["1", "-1", " 1.5e3 ", "1,000", "5-", ".5", "5.", "1E+10", "1e999", "Infinity", "-nan", "+NaN"] {
+            assert!(cell_value(CellKind::Number, ok), "{ok}");
+        }
+        for bad in ["", "abc", ",5", "1e", "- 1", "1.2.3", "--1", "1-+", "0x10", "1 2"] {
+            assert!(!cell_value(CellKind::Number, bad), "{bad}");
+        }
+        assert!(cell_value(CellKind::Date, "2026-11-17T08:30:00.000"));
+        assert!(cell_value(CellKind::Date, "2024-02-29T23:59:59.999+05:30"));
+        assert!(cell_value(CellKind::Date, "2024-02-29T23:59:59.999-0530"));
+        assert!(!cell_value(CellKind::Date, "2023-02-29T00:00:00.000"));
+        assert!(!cell_value(CellKind::Date, "2026-11-17T08:30:00"));
+        assert!(!cell_value(CellKind::Date, "2026-11-17T08:30:00.000Z"));
+        assert!(!cell_value(CellKind::Boolean, "TRUE"));
     }
 }

@@ -7,7 +7,7 @@
 //! }
 //! ```
 
-pub use package::{Report, check};
+pub use package::{Format, Report, check, check_as};
 pub use validate::ValidationError;
 
 pub mod encoding;

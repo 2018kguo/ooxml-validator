@@ -113,6 +113,9 @@ struct Frame<'a> {
     text_start: usize,
     /// Leaf element already reported for having a child.
     leaf_child: bool,
+    /// A cell (CellType) whose first `x:v` child is still to be checked
+    /// against its `t`.
+    cell: Option<values::CellKind>,
 }
 
 pub struct Part<'a> {
@@ -132,6 +135,8 @@ pub struct Part<'a> {
     present: Vec<(u32, &'a [u8], Cow<'a, [u8]>, u32, bool)>,
     /// The package is Strict: namespaces and some values read as Transitional.
     strict: bool,
+    /// The package's ApplicationType bit: constraints for other applications don't run.
+    app: u8,
     values: Vec<Option<Cow<'a, str>>>,
     kids: Vec<Kid>,
     /// Each kid's qualified name, for messages.
@@ -158,9 +163,10 @@ pub struct PartResult {
 }
 
 impl<'a> Part<'a> {
-    pub fn new(xml: &'a [u8], part: &'a str, rels: &'a Rels, strict: bool) -> Self {
+    pub fn new(xml: &'a [u8], part: &'a str, rels: &'a Rels, strict: bool, app: u8) -> Self {
         Part {
             strict,
+            app,
             rels,
             unique: HashMap::new(),
             ac_mc: vec![],
@@ -391,8 +397,10 @@ impl<'a> Part<'a> {
         }
 
         let kind = self.classify(ns, local, qname, root);
-        // IndexReference counts every element under a given parent.
-        if !self.frames.is_empty() && !matches!(kind, Kind::Transparent | Kind::Alternate { .. }) {
+        // IndexReference counts what the SDK's ValidatingTraverse yields (the
+        // root, strong-typed elements, AlternateContent itself, but not what a
+        // Choice or Fallback holds) whose parent is a given element, or all.
+        if matches!(kind, Kind::Typed(_) | Kind::Alternate { .. }) {
             *self.facts.counts.entry(None).or_default() += 1;
             if let Some(Frame { kind: Kind::Typed(p), .. }) = self.frames.last() {
                 if semantic::type_flags(*p).1 {
@@ -403,6 +411,10 @@ impl<'a> Part<'a> {
         }
         let kids_start = self.kids.len();
         let text_start = self.text.len();
+        let cell = match kind {
+            Kind::Typed(t) if cells().0[t as usize] => self.cell_kind(),
+            _ => None,
+        };
         if let Kind::Typed(t) = kind {
             if !mc_attrs.is_empty() {
                 self.mc_attributes(&mc_attrs, qname);
@@ -426,6 +438,7 @@ impl<'a> Part<'a> {
             kids_start,
             text_start,
             leaf_child: false,
+            cell,
             qname,
         });
         Ok(())
@@ -562,6 +575,18 @@ impl<'a> Part<'a> {
         any
     }
 
+    /// The `t` of the cell whose start the reader holds, when it is a type
+    /// CellType checks (DataType.HasValue: a known value).
+    fn cell_kind(&self) -> Option<values::CellKind> {
+        let t = self.reader.attrs.iter().find(|a| a.name == b"t")?;
+        match &*unescape(t.value, true) {
+            "b" => Some(values::CellKind::Boolean),
+            "n" => Some(values::CellKind::Number),
+            "d" => Some(values::CellKind::Date),
+            _ => None,
+        }
+    }
+
     fn frame_name(&self, i: usize) -> &'a str {
         self.frames[i].qname
     }
@@ -580,6 +605,17 @@ impl<'a> Part<'a> {
             if ty.leaf == 2 {
                 let text = std::mem::take(&mut self.text);
                 self.value(ty.validators, ValueKind::StringValue, NONE, Some(&text[f.text_start..]), false, qname, "");
+                // A cell's first direct x:v: its value must suit the cell's type.
+                if t == cells().1
+                    && let Some(Frame { kind: Kind::Typed(_), cell, qname: cell_name, .. }) = self.frames.last_mut()
+                    && let Some(kind) = cell.take()
+                {
+                    let v = &text[f.text_start..];
+                    if !values::cell_value(kind, v) {
+                        let node = *cell_name;
+                        self.error_typed("Sem_CellValue", node, format!("Cell contents have invalid value '{v}' for type '{kind:?}'."), "Semantic");
+                    }
+                }
                 self.text = text;
             } else if ty.leaf == 0 {
                 let kids = &self.kids[f.kids_start..];
@@ -805,6 +841,9 @@ impl<'a> Part<'a> {
         }
         let (cs, cn) = ty.constraints;
         for i in cs..cs + cn as u32 {
+            if CONSTRAINTS[i as usize].apps & self.app == 0 {
+                continue;
+            }
             match semantic::check(&CONSTRAINTS[i as usize], &seen, self.rels) {
                 Outcome::Pass => {}
                 Outcome::Error(id) => self.error_typed(id, qname, format!("Semantic constraint {:?} failed.", CONSTRAINTS[i as usize].kind), "Semantic"),
@@ -987,8 +1026,8 @@ fn uri(s: &str) -> bool {
 }
 
 /// Validates a part's XML with `root` as its root type.
-pub fn validate_part(xml: &[u8], part: &str, root: u16, rels: &Rels, strict: bool) -> PartResult {
-    match Part::new(xml, part, rels, strict).run(root) {
+pub fn validate_part(xml: &[u8], part: &str, root: u16, rels: &Rels, strict: bool, format: crate::package::Format) -> PartResult {
+    match Part::new(xml, part, rels, strict, format.app()).run(root) {
         Ok(r) => r,
         Err(e) => PartResult {
             errors: vec![ValidationError { id: "xml_parse", description: e.message, part: part.to_string(), node: String::new(), location: Some(line_column(xml, e.at)), error_type: "Xml", xpath: None, at: None }],
@@ -996,6 +1035,18 @@ pub fn validate_part(xml: &[u8], part: &str, root: u16, rels: &Rels, strict: boo
             deferred: vec![],
         },
     }
+}
+
+/// Per type, whether it is a CellType (CELL_TYPES); and the cell value type (x:v).
+fn cells() -> &'static (Vec<bool>, u16) {
+    static C: OnceLock<(Vec<bool>, u16)> = OnceLock::new();
+    C.get_or_init(|| {
+        let mut v = vec![false; TYPES.len()];
+        for name in CELL_TYPES {
+            v[type_id(name).expect("cell type") as usize] = true;
+        }
+        (v, type_id("x:CT_Xstring/x:v").expect("cell value type"))
+    })
 }
 
 /// A type id by name ("w:CT_Document/w:document").

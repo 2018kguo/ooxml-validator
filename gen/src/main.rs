@@ -114,7 +114,9 @@ fn main() {
     };
 
     // Semantic constraints, scraped from the generated C# (ConfigureMetadata's
-    // builder.AddConstraint calls); kept when they apply to Word at the target.
+    // builder.AddConstraint calls); kept when they apply at the target, with
+    // the applications they run for (ApplicationType: Word 1, Excel 2,
+    // PowerPoint 4; All when none is named).
     let mut constraints_of: HashMap<String, Vec<String>> = HashMap::new();
     {
         let dir = sdk.join("generated/DocumentFormat.OpenXml/DocumentFormat.OpenXml.Generator/DocumentFormat.OpenXml.Generator.OpenXmlGenerator");
@@ -135,9 +137,15 @@ fn main() {
                 let (kind, rest) = rest.split_once('(').unwrap();
                 let (args, tail) = constraint_args(rest);
                 let app = tail.split("Application = ").nth(1).map(|a| a.split([',', '}']).next().unwrap().trim().to_string());
-                if app.as_ref().is_some_and(|a| !a.contains("Word")) {
-                    continue;
-                }
+                let apps = app.map_or(7, |a| {
+                    a.split('|').map(|x| match x.trim() {
+                        "ApplicationType.Word" => 1,
+                        "ApplicationType.Excel" => 2,
+                        "ApplicationType.PowerPoint" => 4,
+                        "ApplicationType.All" => 7,
+                        other => panic!("application {other}"),
+                    }).fold(0, |m, b| m | b)
+                });
                 let ver = tail.split("Version = FileFormatVersions.").nth(1).map(|v| v.split([',', ' ', '}']).next().unwrap().to_string());
                 if !at_least(version(ver.map(Value::String).as_ref())) {
                     continue;
@@ -159,7 +167,7 @@ fn main() {
                     Arg::Null => "Arg::Null".to_string(),
                     Arg::A(v) => format!("Arg::A(&{v:?})"),
                 }).collect();
-                let row = format!("    Constraint {{ kind: ConstraintKind::{}, args: &[{}] }},", kind.trim_end_matches("Constraint"), args.join(", "));
+                let row = format!("    Constraint {{ kind: ConstraintKind::{}, apps: {apps}, args: &[{}] }},", kind.trim_end_matches("Constraint"), args.join(", "));
                 for t in file_class.get(&(stem.to_string(), class.clone())).into_iter().flatten() {
                     constraints_of.entry(t.clone()).or_default().push(row.clone());
                 }
@@ -500,17 +508,44 @@ fn main() {
                 _ => "NONE".to_string(),
             };
             let start = nkids;
+            // Data parts its relationships may reference (IKnownDataPartFeature):
+            // audio 1, video 2, media 4.
+            let mut data = 0u8;
             for c in parts[n.as_str()]["Children"].as_array().into_iter().flatten() {
+                if c["IsDataPartReference"].as_bool() == Some(true) {
+                    data |= match c["Name"].as_str().unwrap() {
+                        "AudioReferenceRelationship" => 1,
+                        "VideoReferenceRelationship" => 2,
+                        "MediaReferenceRelationship" => 4,
+                        other => panic!("data part reference {other}"),
+                    };
+                    continue;
+                }
                 if let Some(i) = index(c["Name"].as_str().unwrap()) {
                     writeln!(kids, "    PartChild {{ class: {i}, many: {}, required: {} }},",
                         c["MaxOccursGreatThanOne"].as_bool().unwrap_or(false), c["MinOccursIsNonZero"].as_bool().unwrap_or(false)).unwrap();
                     nkids += 1;
                 }
             }
-            writeln!(table, "    PartClass {{ name: {n:?}, rel: {:?}, content_type: {:?}, root: {root}, version: {}, children: ({start}, {}) }},",
+            writeln!(table, "    PartClass {{ name: {n:?}, rel: {:?}, content_type: {:?}, root: {root}, version: {}, children: ({start}, {}), data: {data} }},",
                 parts[n.as_str()]["RelationshipType"].as_str().unwrap_or(""), field("ContentType").unwrap_or(""), version(parts[n.as_str()].get("Version")), nkids - start).unwrap();
         }
         writeln!(s, "pub static PARTS: [PartClass; {}] = [\n{table}];\n", names.len()).unwrap();
+        // Each package's part factory (IPartFactoryFeature.Create): the class a
+        // relationship type makes anywhere in that kind of package; any other
+        // type makes an extended part.
+        let dir = sdk.join("generated/DocumentFormat.OpenXml/DocumentFormat.OpenXml.Generator/DocumentFormat.OpenXml.Generator.OpenXmlGenerator");
+        let mut factories = vec![];
+        for package in ["WordprocessingDocument", "SpreadsheetDocument", "PresentationDocument"] {
+            let src = std::fs::read_to_string(dir.join(format!("Package_{package}_IPartFactoryFeature.g.cs"))).unwrap();
+            let classes: Vec<String> = src.lines().filter_map(|l| {
+                let (c, _) = l.trim().split_once(".RelationshipTypeConstant => new ")?;
+                Some(index(c).unwrap_or_else(|| panic!("factory class {c}")).to_string())
+            }).collect();
+            assert!(classes.len() > 50, "{package} part factory");
+            factories.push(format!("&[{}]", classes.join(", ")));
+        }
+        writeln!(s, "/// Part classes each package's factory makes: Word, Excel, PowerPoint.\npub static FACTORIES: [&[u16]; 3] = [{}];\n", factories.join(", ")).unwrap();
         writeln!(s, "pub static PART_CHILDREN: [PartChild; {nkids}] = [\n{kids}];\n").unwrap();
     }
     writeln!(s, "pub static PARTICLES: [Particle; {nparticles}] = [\n{particles}];\n").unwrap();
@@ -554,6 +589,20 @@ fn main() {
         }
     }
     assert_eq!(handwritten, ["CustomXmlElement.cs"], "hand-written element metadata changed in the SDK: port it in gen");
+    // Hand-written element validators (an element class that is an IValidator,
+    // run by SchemaTypeValidator): only CellType's check of a cell's value
+    // against its type, ported in src/validate.rs. Another one stops generation.
+    let mut element_validators = vec![];
+    for f in std::fs::read_dir(sdk.join("src/DocumentFormat.OpenXml/Schema")).unwrap().flat_map(|d| std::fs::read_dir(d.unwrap().path()).into_iter().flatten()) {
+        let path = f.unwrap().path();
+        if std::fs::read_to_string(&path).unwrap_or_default().contains("IValidator.Validate(") {
+            element_validators.push(path.file_name().unwrap().to_string_lossy().into_owned());
+        }
+    }
+    assert_eq!(element_validators, ["CellType.cs"], "hand-written element validators changed in the SDK: port them in src/validate.rs");
+    let cells: Vec<&String> = names.iter().filter(|n| !n.ends_with('/') && types[n.as_str()]["BaseClass"].as_str() == Some("CellType")).collect();
+    assert!(!cells.is_empty(), "CellType's elements");
+    writeln!(s, "/// Elements whose class is a CellType (Sem_CellValue).\npub static CELL_TYPES: [&str; {}] = {cells:?};\n", cells.len()).unwrap();
     // Classes that rewrite their attributes when the package is Strict. Their
     // logic is ported by hand in src/strict.rs; a new or removed one in an SDK
     // release stops generation, so the port can't drift silently.

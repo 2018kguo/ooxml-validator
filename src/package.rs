@@ -4,15 +4,82 @@
 //! (anything else is an extended part, which has no schema).
 
 use crate::schema::{Arg, ConstraintKind, NONE, PartChild};
-use crate::schema_gen::{CONSTRAINTS, PART_CHILDREN, PARTS, TARGET_VERSION};
+use crate::schema_gen::{CONSTRAINTS, FACTORIES, PART_CHILDREN, PARTS, TARGET_VERSION};
 use crate::semantic::{Facts, Rels};
 use crate::validate::{ValidationError, validate_part};
 use crate::xml::{Event, Reader};
 use std::collections::{HashMap, VecDeque};
 use std::io::Read;
-use std::sync::OnceLock;
 
-const PACKAGE: &str = "WordprocessingDocument";
+/// The kind of package, as the SDK class that opens it: its main part, its
+/// tree of part classes, and the application semantic constraints filter on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Format {
+    /// WordprocessingDocument: .docx, .docm, .dotx, .dotm.
+    Word,
+    /// SpreadsheetDocument: .xlsx, .xlsm, .xltx, .xltm, .xlam.
+    Excel,
+    /// PresentationDocument: .pptx, .pptm, .potx, .potm, .ppsx, .ppsm, .ppam.
+    PowerPoint,
+}
+
+impl Format {
+    /// The SDK's package class.
+    pub fn package(self) -> &'static str {
+        match self {
+            Format::Word => "WordprocessingDocument",
+            Format::Excel => "SpreadsheetDocument",
+            Format::PowerPoint => "PresentationDocument",
+        }
+    }
+
+    /// Its ApplicationType bit, as semantic constraints are filtered.
+    pub fn app(self) -> u8 {
+        match self {
+            Format::Word => 1,
+            Format::Excel => 2,
+            Format::PowerPoint => 4,
+        }
+    }
+
+    /// The format a file name's extension names, if any.
+    pub fn from_extension(path: &str) -> Option<Format> {
+        let ext = path.rsplit_once('.')?.1.to_ascii_lowercase();
+        match ext.as_str() {
+            "docx" | "docm" | "dotx" | "dotm" => Some(Format::Word),
+            "xlsx" | "xlsm" | "xltx" | "xltm" | "xlam" => Some(Format::Excel),
+            "pptx" | "pptm" | "potx" | "potm" | "ppsx" | "ppsm" | "ppam" => Some(Format::PowerPoint),
+            _ => None,
+        }
+    }
+
+    /// The format a main part's content type names (each package class's
+    /// GetDocumentType); None for one no class knows.
+    pub fn from_content_type(ct: &str) -> Option<Format> {
+        let ct = ct.trim().to_ascii_lowercase();
+        if ct.contains("wordprocessingml") || ct.starts_with("application/vnd.ms-word.") {
+            Some(Format::Word)
+        } else if ct.contains("spreadsheetml") || ct.starts_with("application/vnd.ms-excel.") {
+            Some(Format::Excel)
+        } else if ct.contains("presentationml") || ct.starts_with("application/vnd.ms-powerpoint.") {
+            Some(Format::PowerPoint)
+        } else {
+            None
+        }
+    }
+
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    fn noun(self) -> &'static str {
+        match self {
+            Format::Word => "DOCX",
+            Format::Excel => "XLSX",
+            Format::PowerPoint => "PPTX",
+        }
+    }
+}
 
 fn class(name: &str) -> Option<usize> {
     PARTS.iter().position(|p| p.name == name)
@@ -28,24 +95,11 @@ fn child_class(parent: usize, rel: &str) -> Option<usize> {
     rules(parent).iter().map(|c| c.class as usize).find(|&c| PARTS[c].rel == rel)
 }
 
-/// The SDK's part factory is global: a known relationship type makes its
-/// class anywhere (then reported as not allowed there). Where several classes
-/// share a type, the one a Word package can hold.
-fn global_class(rel: &str) -> Option<usize> {
-    static WORD: OnceLock<Vec<bool>> = OnceLock::new();
-    let word = WORD.get_or_init(|| {
-        let mut seen = vec![false; PARTS.len()];
-        let mut stack = vec![class(PACKAGE).unwrap()];
-        while let Some(c) = stack.pop() {
-            if !std::mem::replace(&mut seen[c], true) {
-                stack.extend(rules(c).iter().map(|r| r.class as usize));
-            }
-        }
-        seen
-    });
-    let mut all = (0..PARTS.len()).filter(|&c| !rel.is_empty() && PARTS[c].rel == rel);
-    let first = all.next()?;
-    Some(std::iter::once(first).chain(all).find(|&c| word[c]).unwrap_or(first))
+/// The package's part factory: the class a relationship type makes anywhere
+/// in this kind of package (then reported as not allowed where its parent
+/// doesn't hold it); None makes an extended part.
+fn global_class(format: Format, rel: &str) -> Option<usize> {
+    FACTORIES[format.index()].iter().map(|&c| c as usize).find(|&c| PARTS[c].rel == rel)
 }
 
 /// Resolves a relationship target against its source part's folder.
@@ -69,13 +123,17 @@ fn resolve(source: &str, target: &str) -> String {
     segments.join("/")
 }
 
+/// A part name with its escapes undone, as URIs compare: an escaped
+/// reserved character or `%` stays escaped (`%21` is not `!`).
 fn percent_decode(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%' && i + 2 < b.len() {
-            if let Some(v) = s.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok()) {
+            if let Some(v) = s.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok())
+                && !b":/?#[]@!$&'()*+,;=%".contains(&v)
+            {
                 out.push(v);
                 i += 3;
                 continue;
@@ -209,6 +267,12 @@ impl Files {
                     if matches!(e, Event::Eof) { break } else { continue }
                 };
                 let get = |k: &[u8]| r.attrs.iter().find(|a| a.name == k).map(|a| String::from_utf8_lossy(a.value).into_owned());
+                if name == b"Override"
+                    && let Some(x) = get(b"PartName")
+                    && !part_name(x.trim_start_matches('/'))
+                {
+                    duplicate.get_or_insert_with(|| format!("[Content_Types].xml names an invalid part, {x}."));
+                }
                 let replaced = match (name, get(b"ContentType")) {
                     (b"Default", Some(ct)) => get(b"Extension").and_then(|x| defaults.insert(x.to_lowercase(), ct)),
                     (b"Override", Some(ct)) => get(b"PartName").and_then(|x| overrides.insert(percent_decode(x.trim_start_matches('/')), ct)),
@@ -222,8 +286,10 @@ impl Files {
         Files { entries, index, names, defaults, overrides, duplicate }
     }
 
+    /// A part: an entry named as a part URI that the content types give a
+    /// type (System.IO.Packaging ignores any other entry).
     fn exists(&self, path: &str) -> bool {
-        self.names.contains_key(&key(path))
+        self.names.get(&key(path)).is_some_and(|n| part_name(n)) && self.content_type(path).is_some()
     }
 
     /// A part's content type, as the package declares it.
@@ -231,6 +297,17 @@ impl Files {
         let actual = self.names.get(&key(path)).map_or(path.to_string(), |n| percent_decode(n));
         let path = actual.as_str();
         self.overrides.get(path).or_else(|| self.defaults.get(&path.rsplit_once('.')?.1.to_lowercase())).map(String::as_str)
+    }
+
+    /// The format the main part's content type names: the package's
+    /// officeDocument relationship, as each package class finds its main part.
+    pub fn format(&self) -> Format {
+        const MAIN: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
+        let rels = self.get("_rels/.rels").and_then(|(_, x)| relationships(x).ok()).unwrap_or_default();
+        rels.iter()
+            .filter(|r| r.1 == MAIN && !r.3)
+            .find_map(|r| Format::from_content_type(self.content_type(&resolve("", &r.2))?))
+            .unwrap_or(Format::Word)
     }
 
     fn get(&self, name: &str) -> Option<(usize, &[u8])> {
@@ -252,20 +329,39 @@ pub struct Outcome {
 /// Validates every reachable part of a package: discovers the part tree from
 /// the relationship parts, validates the parts in parallel, then checks the
 /// package's structure and the constraints that span parts.
-pub fn validate(files: &Files) -> Outcome {
-    let package = class(PACKAGE).expect("package class");
+pub fn validate(files: &Files, format: Format) -> Outcome {
+    let package = class(format.package()).expect("package class");
     let mut nodes: Vec<Node> = vec![];
     let mut index: HashMap<String, usize> = HashMap::new();
     let mut top: Vec<(Option<usize>, usize, String)> = vec![];
     let mut rels_of: Vec<Rels> = vec![];
     let mut rels_error: Option<String> = None;
-    let mut read_rels = |path: &str| match files.get(path).map(|(_, x)| relationships(x)) {
-        Some(Ok(r)) => r,
-        Some(Err(e)) => {
-            rels_error.get_or_insert(format!("/{path}: {e}"));
+    // A relationship part only counts when it is a part, and then it must be
+    // typed as one (InternalRelationshipCollection).
+    let rels_part = |path: &str| -> Result<Option<&[u8]>, String> {
+        if !files.exists(path) {
+            return Ok(None);
+        }
+        let ct = files.content_type(path).unwrap_or("");
+        let essence = ct.split(';').next().unwrap_or("").trim();
+        if !essence.eq_ignore_ascii_case("application/vnd.openxmlformats-package.relationships+xml") {
+            return Err(format!("/{path}: The relationship part has content type {ct:?}."));
+        }
+        Ok(files.get(path).map(|e| e.1))
+    };
+    let mut read_rels = |path: &str| match rels_part(path).map(|x| x.map(relationships)) {
+        Err(e) => {
+            rels_error.get_or_insert(e);
             vec![]
         }
-        None => vec![],
+        Ok(x) => match x {
+            Some(Ok(r)) => r,
+            Some(Err(e)) => {
+                rels_error.get_or_insert(format!("/{path}: {e}"));
+                vec![]
+            }
+            None => vec![],
+        },
     };
     // StrictRelationshipFound: some relationship the package loads is Strict.
     let mut strict = false;
@@ -277,16 +373,19 @@ pub fn validate(files: &Files) -> Outcome {
     // What the SDK throws while loading the package (any one aborts validation).
     let mut open_error: Option<String> = files.duplicate.clone();
     let mut first_rel: Vec<String> = vec![];
+    // Data parts (media, audio, video) each container references: (node, type).
+    let mut data_refs: Vec<(Option<usize>, String)> = vec![];
     let root_rels = read_rels("_rels/.rels");
     note(&root_rels, files.get("_rels/.rels").map(|e| e.1));
     for (_, t, target, external) in root_rels {
-        if !external && loads_part(files, &t, &resolve("", &target), &target, &mut open_error) {
-            queue.push_back((resolve("", &target), child_class(package, &t).or_else(|| global_class(&t)), None, t));
+        if !external && loads_part(files, &t, &resolve("", &target), &target, &mut open_error, &mut |t| data_refs.push((None, t))) {
+            queue.push_back((resolve("", &target), child_class(package, &t).or_else(|| global_class(format, &t)), None, t));
         }
     }
     while let Some((path, cls, parent, rel)) = queue.pop_front() {
-        let n = match index.get(&path) {
-            Some(&n) => {
+        let reached = index.get(&path).copied();
+        let n = match reached {
+            Some(n) => {
                 // A shared part must be reached by one relationship type.
                 if first_rel[n] != rel {
                     open_error.get_or_insert_with(|| format!("The same part /{path} is referenced by different relationship types."));
@@ -318,8 +417,8 @@ pub fn validate(files: &Files) -> Outcome {
             Some(p) => nodes[p].children.push((cls, n, rel)),
             None => top.push((cls, n, rel)),
         }
-        if n + 1 != nodes.len() {
-            continue; // reached before
+        if reached.is_some() {
+            continue; // its relationships are read once
         }
         if std::env::var_os("OOXML_VALIDATOR_TRACE").is_some() {
             eprintln!("part {path} {:?}", cls.map(|c| PARTS[c].name));
@@ -331,8 +430,8 @@ pub fn validate(files: &Files) -> Outcome {
         note(&rels, files.get(&rels_path(&path)).map(|e| e.1));
         rels_of[n] = Rels { types: rels.iter().map(|(id, t, _, _)| (id.clone(), t.clone())).collect() };
         for (_, t, target, external) in rels {
-            if !external && loads_part(files, &t, &resolve(&path, &target), &target, &mut open_error) {
-                let child = cls.and_then(|c| child_class(c, &t)).or_else(|| global_class(&t));
+            if !external && loads_part(files, &t, &resolve(&path, &target), &target, &mut open_error, &mut |t| data_refs.push((Some(n), t))) {
+                let child = cls.and_then(|c| child_class(c, &t)).or_else(|| global_class(format, &t));
                 queue.push_back((resolve(&path, &target), child, Some(n), t));
             }
         }
@@ -358,7 +457,7 @@ pub fn validate(files: &Files) -> Outcome {
             loop {
                 let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let Some(&(n, _, xml, root)) = jobs.get(k) else { break };
-                out.push((n, validate_part(xml, &format!("/{}", nodes[n].path), root, &rels_of[n], strict)));
+                out.push((n, validate_part(xml, &format!("/{}", nodes[n].path), root, &rels_of[n], strict, format)));
             }
             out
         };
@@ -390,6 +489,20 @@ pub fn validate(files: &Files) -> Outcome {
 
     // Package structure (PackageValidator), reported before the parts.
     let mut structure = vec![];
+    // A data part reference its container's class doesn't know (an extended
+    // part, or the package itself, knows none).
+    for (n, rel) in &data_refs {
+        let known = n.and_then(|n| nodes[n].class).map_or(0, |c| PARTS[c].data);
+        let bit = match rel.as_str() {
+            AUDIO => 1,
+            VIDEO => 2,
+            _ => 4,
+        };
+        if known & bit == 0 {
+            let part = n.map_or(String::new(), |n| format!("/{}", nodes[n].path));
+            structure.push(ValidationError { id: "Pkg_DataPartReferenceIsNotAllowed", description: format!("A part here cannot reference a data part of type {rel}"), part, node: String::new(), location: None, error_type: "Package" });
+        }
+    }
     let containers = std::iter::once((Some(package), None, &top)).chain(nodes.iter().map(|n| (n.class, Some(n.path.as_str()), &n.children)));
     for (cls, path, kids) in containers {
         let Some(c) = cls else { continue }; // an extended part has no rules
@@ -466,24 +579,24 @@ pub fn validate(files: &Files) -> Outcome {
 /// Whether an internal relationship loads a part (LoadReferencedPartsAndRelationships):
 /// hyperlinks and "NULL" targets never do; media, audio and video references load
 /// a data part, which must exist.
-fn loads_part(files: &Files, rel: &str, path: &str, target: &str, open_error: &mut Option<String>) -> bool {
+fn loads_part(files: &Files, rel: &str, path: &str, target: &str, open_error: &mut Option<String>, data: &mut dyn FnMut(String)) -> bool {
     const HYPERLINK: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink";
-    const DATA: [&str; 3] = [
-        "http://schemas.microsoft.com/office/2007/relationships/media",
-        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/audio",
-        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/video",
-    ];
     if rel == HYPERLINK || target.eq_ignore_ascii_case("NULL") {
         return false;
     }
-    if DATA.contains(&rel) {
+    if [MEDIA, AUDIO, VIDEO].contains(&rel) {
         if !files.exists(path) {
             open_error.get_or_insert_with(|| format!("Part: /{path} doesn't exist in the package."));
         }
+        data(rel.to_string());
         return false;
     }
     true
 }
+
+const MEDIA: &str = "http://schemas.microsoft.com/office/2007/relationships/media";
+const AUDIO: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/audio";
+const VIDEO: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/video";
 
 /// The verdict on one .docx: a package that cannot be read is not OK.
 pub struct Report {
@@ -532,21 +645,34 @@ pub fn json(s: &str) -> String {
     out
 }
 
-/// Validates a .docx as bytes: package limits; every XML entry well formed
+/// Validates a package as bytes, opened as the class its main part's content
+/// type names (a Word document when none does). See `check_as`.
+pub fn check(bytes: &[u8]) -> Report {
+    check_as(bytes, None)
+}
+
+/// Validates a package as bytes, as `format` (or the format its main part's
+/// content type names): package limits; every XML entry well formed
 /// (reachable or not; the first failure in zip order is the verdict, as the
 /// SDK wrapper's prepass has it); every reachable part against the schema and
 /// its semantic constraints. Each entry is inflated once.
-pub fn check(bytes: &[u8]) -> Report {
+pub fn check_as(bytes: &[u8], format: Option<Format>) -> Report {
     let fail = |e: String| Report { open_error: Some(e), errors: vec![] };
+    let noun = format.map_or("The package", Format::noun);
     if bytes.len() > 100 << 20 {
-        return fail("DOCX exceeds the 100 MB validation limit.".into());
+        return fail(format!("{noun} exceeds the 100 MB validation limit."));
     }
     let mut zip = match zip::ZipArchive::new(std::io::Cursor::new(bytes)) {
         Ok(z) => z,
         Err(e) => return fail(e.to_string()),
     };
+    // The zip reader keeps one entry per name; the central directory may list
+    // a name twice, which System.IO.Packaging refuses.
+    if eocd_entries(bytes).is_some_and(|n| n > zip.len()) {
+        return fail(format!("{noun} contains ambiguous duplicate ZIP part names."));
+    }
     if zip.len() > 10000 {
-        return fail("DOCX exceeds the 10000-part validation limit.".into());
+        return fail(format!("{noun} exceeds the 10000-part validation limit."));
     }
     let mut names = HashMap::new();
     let mut seen = std::collections::HashSet::new();
@@ -554,11 +680,27 @@ pub fn check(bytes: &[u8]) -> Report {
     let mut entries = vec![];
     // Entries whose bytes don't decode as their encoding says: (index, message).
     let mut undecodable: Option<(usize, String)> = None;
+    // An XML entry that can't be read (a bad header, corrupt deflate data): the
+    // SDK wrapper's prepass stops there, unless an earlier entry isn't XML.
+    let mut corrupt: Option<String> = None;
     for i in 0..zip.len() {
-        let Ok(f) = zip.by_index(i) else { return fail("unreadable entry".into()) };
+        let entry_name = zip.name_for_index(i).map(str::to_string);
+        let f = match zip.by_index(i) {
+            Ok(f) => f,
+            Err(e) => {
+                let Some(name) = entry_name else { return fail(e.to_string()) };
+                names.insert(key(&name), name.clone());
+                let lower = name.to_lowercase();
+                if lower.ends_with(".xml") || lower.ends_with(".rels") {
+                    corrupt = Some(format!("'{name}' cannot be read: {e}"));
+                    break;
+                }
+                continue;
+            }
+        };
         let name = f.name().to_string();
         if !seen.insert(name.to_lowercase()) {
-            return fail("DOCX contains ambiguous duplicate ZIP part names.".into());
+            return fail(format!("{noun} contains ambiguous duplicate ZIP part names."));
         }
         names.insert(key(&name), name.clone());
         let lower = name.to_lowercase();
@@ -566,18 +708,20 @@ pub fn check(bytes: &[u8]) -> Report {
             continue;
         }
         if f.size() > budget {
-            return fail("DOCX XML exceeds the 128 MB validation limit.".into());
+            return fail(format!("{noun} XML exceeds the 128 MB validation limit."));
         }
         let size = f.size();
         budget -= size;
-        // Exactly the declared size, read in one go: an entry that inflates past
-        // it is refused rather than allowed to outgrow the budget.
+        // At most the declared size, read in one go, as .NET's ZipArchive reads
+        // an entry: it stops there, doesn't check the CRC-32, and ends a deflate
+        // stream that runs out of input. What it read is then parsed as XML.
         let mut xml = Vec::with_capacity(size as usize);
-        if let Err(e) = f.take(size + 1).read_to_end(&mut xml) {
-            return fail(e.to_string());
-        }
-        if xml.len() as u64 > size {
-            return fail(format!("'{name}' inflates past its declared size."));
+        if let Err(e) = f.take(size).read_to_end(&mut xml) {
+            let m = e.to_string();
+            if !m.contains("checksum") && !m.contains("incomplete deflate stream") {
+                corrupt = Some(format!("'{name}' cannot be read: {m}"));
+                break;
+            }
         }
         // Parts in UTF-16 or Latin-1 are read as text, as XmlReader reads them.
         match crate::encoding::to_utf8(&xml) {
@@ -588,7 +732,8 @@ pub fn check(bytes: &[u8]) -> Report {
         entries.push((name, xml));
     }
     let files = Files::new(entries, names);
-    let mut out = validate(&files);
+    let format = format.unwrap_or_else(|| files.format());
+    let mut out = validate(&files, format);
     // Entries no part validation read are checked as XML alone.
     for (i, (name, xml)) in files.entries.iter().enumerate() {
         if out.parsed[i] || out.malformed.as_ref().is_some_and(|m| m.0 < i) {
@@ -609,6 +754,9 @@ pub fn check(bytes: &[u8]) -> Report {
     if let Some((_, e)) = out.malformed {
         return Report { open_error: Some(e.description.clone()), errors: vec![e] };
     }
+    if let Some(e) = corrupt {
+        return fail(e);
+    }
     if let Some(e) = out.open_error {
         return Report { open_error: Some(e), errors: vec![] };
     }
@@ -617,6 +765,39 @@ pub fn check(bytes: &[u8]) -> Report {
     }
     // Every error: a caller matching the SDK wrapper keeps the first 50.
     Report { open_error: None, errors: out.errors }
+}
+
+/// Whether a zip entry name (or an Override's PartName) is a part URI as
+/// PackUriHelper validates one: URI characters only (no space, nothing past
+/// ASCII, none of `#?\^`|{}"<>`), and each `%` escaping a byte that needs it.
+fn part_name(name: &str) -> bool {
+    let b = name.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'%' {
+            let hex = name.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok());
+            match hex {
+                Some(v) if !(v.is_ascii_alphanumeric() || matches!(v, b'-' | b'.' | b'_' | b'~')) => i += 3,
+                _ => return false,
+            }
+            continue;
+        }
+        if !(c.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=:@/[]".contains(&c)) {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// The entry count the end of central directory record states (None for
+/// ZIP64 or no record).
+fn eocd_entries(bytes: &[u8]) -> Option<usize> {
+    let tail = &bytes[bytes.len().saturating_sub(65557)..];
+    let at = memchr::memmem::rfind(tail, b"PK\x05\x06")?;
+    let n = u16::from_le_bytes(tail.get(at + 10..at + 12)?.try_into().ok()?);
+    (n != u16::MAX).then_some(n as usize)
 }
 
 /// What XDocument.Load over an XmlReader accepts: well-formed XML (the
