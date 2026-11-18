@@ -23,9 +23,9 @@ export class TimeoutError extends Error {
 }
 
 /**
- * @param {{ threads?: number }} [options]
+ * @param {{ threads?: number, onReplace?: (reason: "timeout" | "exit" | "memory") => void }} [options]
  */
-export function createValidatorPool({ threads = 1 } = {}) {
+export function createValidatorPool({ threads = 1, onReplace } = {}) {
   let closed = false;
   let next = 0;
   const workers = [];
@@ -56,7 +56,7 @@ export function createValidatorPool({ threads = 1 } = {}) {
 
   // Stop a worker and start another in its slot. The call it was running fails
   // with `error`; calls queued behind it move to the new worker untouched.
-  function replace(w, error) {
+  function replace(w, error, reason) {
     const slot = workers.indexOf(w);
     if (slot < 0) return;
     const runningId = running(w);
@@ -76,6 +76,7 @@ export function createValidatorPool({ threads = 1 } = {}) {
     workers[slot] = fresh;
     failed?.reject(error);
     for (const [id, call] of queued) send(fresh, id, call);
+    onReplace?.(reason);
   }
 
   function start() {
@@ -86,14 +87,14 @@ export function createValidatorPool({ threads = 1 } = {}) {
       const call = settle(w, id);
       // No new work goes to a retiring worker; once idle, a new one replaces it.
       w.retiring ||= Boolean(recycle);
-      if (w.retiring && w.pending.size === 0) replace(w);
+      if (w.retiring && w.pending.size === 0) replace(w, undefined, "memory");
       if (!call) return;
       if (error) call.reject(new Error(error));
       else call.resolve(report);
     });
     // Crashed or out of memory: the call it was running fails, the rest move on.
     const gone = (error) => {
-      if (workers.includes(w)) replace(w, error ?? new Error("ooxml-validator worker exited"));
+      if (workers.includes(w)) replace(w, error ?? new Error("ooxml-validator worker exited"), "exit");
     };
     worker.on("error", gone);
     worker.on("exit", () => gone());
@@ -124,7 +125,7 @@ export function createValidatorPool({ threads = 1 } = {}) {
             const error = new TimeoutError(`validation took longer than ${timeoutMs} ms`);
             // Running: stop that worker so the abandoned work ends there.
             // Still queued behind another call: just give up on it.
-            if (running(owner) === id) replace(owner, error);
+            if (running(owner) === id) replace(owner, error, "timeout");
             else settle(owner, id)?.reject(error);
           }, timeoutMs);
         }

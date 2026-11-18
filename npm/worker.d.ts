@@ -15,5 +15,12 @@ export class TimeoutError extends Error {
   name: "TimeoutError";
 }
 
-/** Worker threads (default 1), each with its own WebAssembly instance. Node only. */
-export function createValidatorPool(options?: { threads?: number }): ValidatorPool;
+/**
+ * Worker threads (default 1), each with its own WebAssembly instance. Node only.
+ * `onReplace` hears each worker replaced: a call ran past its timeout, the
+ * worker exited or crashed, or it grew past 64 MB and was retired once idle.
+ */
+export function createValidatorPool(options?: {
+  threads?: number;
+  onReplace?: (reason: "timeout" | "exit" | "memory") => void;
+}): ValidatorPool;

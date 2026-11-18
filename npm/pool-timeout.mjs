@@ -17,13 +17,19 @@ console.log(JSON.stringify(results));
 const ok = results.slow.startsWith("TimeoutError") && results.other === "ok true" && results.queued === "ok true";
 // One worker: a call moved to the new worker keeps its deadline and can time
 // out there too, freeing that worker for the next call.
-const single = createValidatorPool({ threads: 1 });
+const replaced = [];
+const single = createValidatorPool({ threads: 1, onReplace: (reason) => replaced.push(reason) });
 const first = settled(single.validate(big, { timeoutMs: 1 }));
 const moved = settled(single.validate(big, { timeoutMs: 1 }));
 const moves = { first: await first, moved: await moved, next: await settled(single.validate(big)) };
 console.log(JSON.stringify(moves));
 if (!moves.first.startsWith("TimeoutError") || !moves.moved.startsWith("TimeoutError") || moves.next !== "ok true") {
   console.error("FAIL: a moved call lost its deadline");
+  process.exit(1);
+}
+// Each replacement is reported once, with its reason.
+if (replaced.join() !== "timeout,timeout") {
+  console.error("FAIL: onReplace heard", replaced);
   process.exit(1);
 }
 const after = await settled(pool.validate(big, { timeoutMs: 60_000 }));
