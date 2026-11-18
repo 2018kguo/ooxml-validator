@@ -437,6 +437,8 @@ pub fn validate(files: &Files, format: Format) -> Outcome {
                 if let Some(c) = cls
                     && !PARTS[c].content_type.is_empty()
                     && files.content_type(&path) != Some(PARTS[c].content_type)
+                    // Model3DReferenceRelationshipPart.IsValidContentType: PowerPoint writes this one too.
+                    && !(PARTS[c].name == "Model3DReferenceRelationshipPart" && files.content_type(&path) == Some("model/gltf.binary"))
                 {
                     open_error.get_or_insert_with(|| format!("The part /{path} has content type {:?}; expected {}.", files.content_type(&path).unwrap_or(""), PARTS[c].content_type));
                 }

@@ -600,6 +600,16 @@ fn main() {
         }
     }
     assert_eq!(element_validators, ["CellType.cs"], "hand-written element validators changed in the SDK: port them in src/validate.rs");
+    // Parts that accept another content type (IsValidContentType overrides):
+    // only Model3DReferenceRelationshipPart's, ported in src/package.rs.
+    let mut content_types = vec![];
+    for f in std::fs::read_dir(sdk.join("src/DocumentFormat.OpenXml/Packaging")).unwrap() {
+        let path = f.unwrap().path();
+        if std::fs::read_to_string(&path).unwrap_or_default().contains("override bool IsValidContentType(") {
+            content_types.push(path.file_name().unwrap().to_string_lossy().into_owned());
+        }
+    }
+    assert_eq!(content_types, ["Model3DReferenceRelationshipPart.cs"], "a part's content type rule changed in the SDK: port it in src/package.rs");
     let cells: Vec<&String> = names.iter().filter(|n| !n.ends_with('/') && types[n.as_str()]["BaseClass"].as_str() == Some("CellType")).collect();
     assert!(!cells.is_empty(), "CellType's elements");
     writeln!(s, "/// Elements whose class is a CellType (Sem_CellValue).\npub static CELL_TYPES: [&str; {}] = {cells:?};\n", cells.len()).unwrap();
