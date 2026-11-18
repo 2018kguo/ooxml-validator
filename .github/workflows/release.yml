@@ -36,7 +36,8 @@ jobs:
       # Nothing ships unless it agrees with the pinned SDK.
       - run: WORK=$RUNNER_TEMP/agree fuzz/agree.sh
       - run: scripts/build-npm.sh && node npm/same.mjs target/release/ooxml-validator $RUNNER_TEMP/agree/docs/all.txt
-      - run: timeout 30 node npm/pool-exits.mjs | grep "unawaited still delivered"
+      - run: timeout 30 node npm/pool-exits.mjs       - run: python3 bench/generate.py $RUNNER_TEMP/report.docx 400 && timeout 60 node npm/pool-timeout.mjs $RUNNER_TEMP/report.docx
+| grep "unawaited still delivered"
       - name: Pack
         if: inputs.dry_run
         run: |
