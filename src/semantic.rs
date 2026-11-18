@@ -36,7 +36,15 @@ pub struct Deferred {
     pub count: u32,
 }
 
+/// An element's declared attributes and their values, side by side.
+#[derive(Clone, Copy)]
+pub struct Attrs<'v> {
+    pub declared: &'static [Attr],
+    pub values: &'v [Option<std::borrow::Cow<'v, str>>],
+}
+
 /// An attribute as constraints see it (AttributeEntry): declared, maybe present.
+#[derive(Clone, Copy)]
 pub struct Seen<'v> {
     pub attr: &'static Attr,
     pub value: Option<&'v str>,
@@ -63,6 +71,12 @@ pub fn type_flags(t: u16) -> (bool, bool) {
     F.get_or_init(|| {
         crate::schema_gen::TYPES.iter().map(|ty| (is_target(ty.ns, ty.local), targets().1.contains(&Some((ty.ns, ty.local))))).collect()
     })[t as usize]
+}
+
+/// The ReferenceExist targets an element of this type holds.
+pub fn type_targets(t: u16) -> &'static [(u16, &'static str, &'static str)] {
+    static T: OnceLock<Vec<Vec<(u16, &'static str, &'static str)>>> = OnceLock::new();
+    &T.get_or_init(|| TYPES.iter().map(|ty| targets().0.iter().filter(|r| r.0 == ty.ns && r.1 == ty.local).copied().collect()).collect())[t as usize]
 }
 
 pub fn targets() -> &'static (HashSet<(u16, &'static str, &'static str)>, HashSet<Option<(u16, &'static str)>>) {
@@ -95,7 +109,12 @@ fn patterns() -> &'static HashMap<&'static str, Regex> {
             .filter_map(|c| match c.args[1] {
                 Arg::S(p) => {
                     let anchored = if p.starts_with('^') && p.ends_with('$') { p.to_string() } else { format!("^{p}$") };
-                    Regex::new(&anchored).ok().map(|r| (p, r))
+                    // .NET's named block; the regex crate knows only scripts and categories.
+                    let translated = anchored.replace(r"\P{IsBasicLatin}", r"[^\x00-\x7F]").replace(r"\p{IsBasicLatin}", r"[\x00-\x7F]");
+                    // .NET's final `$` also matches before a trailing line feed.
+                    let translated = format!("{}\n?$", &translated[..translated.len() - 1]);
+                    // Every pattern must compile: one that didn't would pass every value.
+                    Some((p, Regex::new(&translated).expect("constraint pattern")))
                 }
                 _ => None,
             })
@@ -105,15 +124,12 @@ fn patterns() -> &'static HashMap<&'static str, Regex> {
 
 /// SemanticConstraint.TryFindAttribute: a declared attribute by local name,
 /// preferring one in the given namespace.
-pub fn find<'s, 'v>(seen: &'s [Seen<'v>], (ns, local): (u16, &str)) -> Option<&'s Seen<'v>> {
-    // Names are a few bytes: compared inline rather than through memcmp,
-    // since a cell runs this for each of its constraints.
-    let same = |a: &str| a.len() == local.len() && a.bytes().zip(local.bytes()).all(|(x, y)| x == y);
+pub fn find(declared: &[Attr], (ns, local): (u16, &str)) -> Option<usize> {
     let mut found = None;
-    for s in seen {
-        if same(s.attr.local) {
-            found = Some(s);
-            if s.attr.ns == ns {
+    for (k, a) in declared.iter().enumerate() {
+        if a.local == local {
+            found = Some(k);
+            if a.ns == ns {
                 return found;
             }
         }
@@ -123,7 +139,7 @@ pub fn find<'s, 'v>(seen: &'s [Seen<'v>], (ns, local): (u16, &str)) -> Option<&'
 
 /// GetAttrNumVal: hex for HexBinaryValue, else digits with an optional point
 /// (NumberStyles.AllowDecimalPoint: no sign, no space, no exponent).
-fn number(s: &Seen) -> Option<f64> {
+fn number(s: Seen) -> Option<f64> {
     let v = s.value?;
     if s.attr.value == ValueKind::HexBinaryValue {
         return i64::from_str_radix(v.trim(), 16).ok().map(|n| n as f64);
@@ -162,7 +178,7 @@ fn as_bool(kind: ValueKind, v: &str) -> Option<bool> {
 }
 
 /// SemanticConstraint.AttributeValueEquals.
-fn equals(s: &Seen, value: &str) -> bool {
+fn equals(s: Seen, value: &str) -> bool {
     use ValueKind::*;
     let Some(text) = s.value else { return false };
     let kind = s.attr.value;
@@ -187,12 +203,40 @@ fn equals(s: &Seen, value: &str) -> bool {
     text == value
 }
 
-fn present<'s, 'v>(seen: &'s [Seen<'v>], a: &Arg) -> Option<&'s Seen<'v>> {
-    find(seen, q(a)?).filter(|s| s.value.is_some())
+/// For each constraint, each argument's attribute as `find` would pick it
+/// from its type's declared attributes (an index, NONE if none): resolved once,
+/// since a constraint belongs to one type.
+fn slots() -> &'static [[u8; 6]] {
+    static S: OnceLock<Vec<[u8; 6]>> = OnceLock::new();
+    S.get_or_init(|| {
+        let mut out = vec![[NONE; 6]; CONSTRAINTS.len()];
+        for ty in TYPES.iter() {
+            let declared = &ATTRS[ty.attrs.0 as usize..][..ty.attrs.1 as usize];
+            for i in ty.constraints.0..ty.constraints.0 + ty.constraints.1 as u32 {
+                for (k, a) in CONSTRAINTS[i as usize].args.iter().enumerate() {
+                    if let Some(f) = q(a).and_then(|x| find(declared, x)) {
+                        out[i as usize][k] = f as u8;
+                    }
+                }
+            }
+        }
+        out
+    })
 }
 
-fn nonempty<'v>(seen: &[Seen<'v>], a: &Arg) -> Option<&'v str> {
-    present(seen, a).and_then(|s| s.value).filter(|v| !v.is_empty())
+const NONE: u8 = u8::MAX;
+
+fn get(seen: Attrs<'_>, slot: u8) -> Option<Seen<'_>> {
+    let k = slot as usize;
+    Some(Seen { attr: seen.declared.get(k)?, value: seen.values[k].as_deref() })
+}
+
+fn present(seen: Attrs<'_>, slot: u8) -> Option<Seen<'_>> {
+    get(seen, slot).filter(|s| s.value.is_some())
+}
+
+fn nonempty(seen: Attrs<'_>, slot: u8) -> Option<&str> {
+    present(seen, slot).and_then(|s| s.value).filter(|v| !v.is_empty())
 }
 
 fn strings(a: &Arg) -> &'static [&'static str] {
@@ -212,15 +256,18 @@ pub enum Outcome<'v> {
 }
 
 /// Runs an element-level constraint against an element's attributes.
-pub fn check<'v>(c: &Constraint, seen: &[Seen<'v>], rels: &Rels) -> Outcome<'v> {
+/// `seen` is the constraint's type's declared attributes, in order.
+pub fn check<'v>(i: usize, seen: Attrs<'v>, rels: &Rels) -> Outcome<'v> {
     use ConstraintKind::*;
     use Outcome::*;
+    let c = &CONSTRAINTS[i];
     let a = c.args;
+    let sl = &slots()[i];
     let data_type = "Sem_AttributeValueDataTypeDetailed";
     let fail = |bad: bool, id| if bad { Error(id) } else { Pass };
     match c.kind {
         AttributeValueRange => {
-            let Some(s) = present(seen, &a[0]).filter(|s| !s.value.unwrap().is_empty() && values::is_valid(s.attr.value, s.attr.enum_id, s.value.unwrap())) else { return Pass };
+            let Some(s) = present(seen, sl[0]).filter(|s| !s.value.unwrap().is_empty() && values::is_valid(s.attr.value, s.attr.enum_id, s.value.unwrap())) else { return Pass };
             let Some(v) = number(s) else { return Pass };
             let (Arg::N(min), Arg::B(min_in), Arg::N(max), Arg::B(max_in)) = (&a[2], &a[3], &a[4], &a[5]) else { return Pass };
             let low = if *min_in { !(*min <= v) } else { !(*min < v) };
@@ -228,34 +275,34 @@ pub fn check<'v>(c: &Constraint, seen: &[Seen<'v>], rels: &Rels) -> Outcome<'v> 
             fail(low || high, data_type)
         }
         AttributeValueLength => {
-            let Some(v) = present(seen, &a[0]).and_then(|s| s.value) else { return Pass };
+            let Some(v) = present(seen, sl[0]).and_then(|s| s.value) else { return Pass };
             let (Arg::N(min), Arg::N(max)) = (&a[1], &a[2]) else { return Pass };
             let len = v.encode_utf16().count() as f64;
             fail(len < *min || len > *max, data_type)
         }
         AttributeValueSet => {
-            let Some(s) = present(seen, &a[0]).filter(|s| !s.value.unwrap().is_empty()) else { return Pass };
+            let Some(s) = present(seen, sl[0]).filter(|s| !s.value.unwrap().is_empty()) else { return Pass };
             let Arg::B(valid) = a[1] else { return Pass };
             let contains = strings(&a[2]).iter().any(|v| equals(s, v));
             fail(!(!valid ^ contains), data_type)
         }
         AttributeValuePattern => {
-            let Some(v) = nonempty(seen, &a[0]) else { return Pass };
+            let Some(v) = nonempty(seen, sl[0]) else { return Pass };
             let Arg::S(p) = a[1] else { return Pass };
             fail(patterns().get(p).is_some_and(|r| !r.is_match(v)), data_type)
         }
-        AttributeMutualExclusive => fail(a.iter().filter(|x| present(seen, x).is_some()).count() > 1, "Sem_AttributeMutualExclusive"),
-        AttributeCannotOmit => fail(q(&a[0]).and_then(|x| find(seen, x)).is_some_and(|s| s.value.is_none()), "Sem_MissRequiredAttribute"),
+        AttributeMutualExclusive => fail((0..a.len()).filter(|&k| present(seen, sl[k]).is_some()).count() > 1, "Sem_AttributeMutualExclusive"),
+        AttributeCannotOmit => fail(get(seen, sl[0]).is_some_and(|s| s.value.is_none()), "Sem_MissRequiredAttribute"),
         AttributeRequiredConditionToValue => {
-            let missing = q(&a[0]).and_then(|x| find(seen, x)).is_some_and(|s| s.value.is_none());
+            let missing = get(seen, sl[0]).is_some_and(|s| s.value.is_none());
             let Arg::S(value) = a[2] else { return Pass };
-            fail(missing && present(seen, &a[1]).is_some_and(|c| equals(c, value)), "Sem_AttributeRequiredConditionToValue")
+            fail(missing && present(seen, sl[1]).is_some_and(|c| equals(c, value)), "Sem_AttributeRequiredConditionToValue")
         }
         AttributeAbsentConditionToNonValue | AttributeAbsentConditionToValue => {
-            if present(seen, &a[0]).is_none() {
+            if present(seen, sl[0]).is_none() {
                 return Pass;
             }
-            let Some(cond) = present(seen, &a[1]) else { return Pass };
+            let Some(cond) = present(seen, sl[1]) else { return Pass };
             let any = strings(&a[2]).iter().any(|v| equals(cond, v));
             if c.kind == AttributeAbsentConditionToNonValue {
                 fail(!any, "Sem_AttributeAbsentConditionToNonValue")
@@ -264,15 +311,15 @@ pub fn check<'v>(c: &Constraint, seen: &[Seen<'v>], rels: &Rels) -> Outcome<'v> 
             }
         }
         AttributeValueConditionToAnother => {
-            let Some(s) = present(seen, &a[0]) else { return Pass };
+            let Some(s) = present(seen, sl[0]) else { return Pass };
             if strings(&a[2]).iter().any(|v| equals(s, v)) {
                 return Pass;
             }
-            let Some(cond) = present(seen, &a[1]) else { return Pass };
+            let Some(cond) = present(seen, sl[1]) else { return Pass };
             fail(strings(&a[3]).iter().any(|v| equals(cond, v)), "Sem_AttributeValueConditionToAnother")
         }
         AttributeValueLessEqualToAnother => {
-            let (Some(x), Some(y)) = (present(seen, &a[0]).and_then(number), present(seen, &a[1]).and_then(number)) else { return Pass };
+            let (Some(x), Some(y)) = (present(seen, sl[0]).and_then(number), present(seen, sl[1]).and_then(number)) else { return Pass };
             let Arg::B(can_equal) = a[2] else { return Pass };
             fail(!((x < y && !can_equal) || (x <= y && can_equal)), "Sem_AttributeValueLessEqualToAnother")
         }
@@ -281,7 +328,7 @@ pub fn check<'v>(c: &Constraint, seen: &[Seen<'v>], rels: &Rels) -> Outcome<'v> 
             if !matches!(a[2], Arg::Null) {
                 return Pass;
             }
-            match present(seen, &a[0]).and_then(|s| s.value) {
+            match present(seen, sl[0]).and_then(|s| s.value) {
                 Some(v) => {
                     let Arg::B(case_sensitive) = a[1] else { return Pass };
                     Unique(if case_sensitive { v.to_string() } else { v.to_lowercase() })
@@ -290,16 +337,16 @@ pub fn check<'v>(c: &Constraint, seen: &[Seen<'v>], rels: &Rels) -> Outcome<'v> 
             }
         }
         RelationshipExist => {
-            let Some(v) = nonempty(seen, &a[0]) else { return Pass };
+            let Some(v) = nonempty(seen, sl[0]) else { return Pass };
             fail(!rels.types.contains_key(v), "Sem_InvalidRelationshipId")
         }
         RelationshipType => {
-            let Some(v) = nonempty(seen, &a[0]) else { return Pass };
+            let Some(v) = nonempty(seen, sl[0]) else { return Pass };
             let Arg::S(want) = a[1] else { return Pass };
             fail(rels.types.get(v).is_some_and(|t| t != want), "Sem_IncorrectRelationshipType")
         }
-        ReferenceExist => nonempty(seen, &a[0]).map_or(Pass, Defer),
-        IndexReference => match nonempty(seen, &a[0]).map(|v| (v, v.parse::<i32>())) {
+        ReferenceExist => nonempty(seen, sl[0]).map_or(Pass, Defer),
+        IndexReference => match nonempty(seen, sl[0]).map(|v| (v, v.parse::<i32>())) {
             Some((v, Ok(_))) => Defer(v),
             _ => Pass,
         },

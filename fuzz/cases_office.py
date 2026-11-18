@@ -109,6 +109,12 @@ xl = [
     ("x_sheet_rid_missing", dict(workbook_xml=workbook('<sheets><sheet name="A" sheetId="1" r:id="rId9"/></sheets>'))),
     ("x_sheet_rid_wrong_type", dict(workbook_xml=workbook('<sheets><sheet name="A" sheetId="1" r:id="rId2"/></sheets>'))),
     ("x_sheet_id_zero", dict(workbook_xml=workbook('<sheets><sheet name="A" sheetId="0" r:id="rId1"/></sheets>'))),
+    # A sheet's code name: .NET's pattern, with its IsBasicLatin block and a `$`
+    # that also matches before one final line feed.
+    *[(f"x_code_name_{tag}", dict(sheet_xml=sheet(before=f'<sheetPr codeName="{v}"/>'))) for tag, v in [
+        ("ok", "Sheet1"), ("digit", "1Sheet"), ("space", "Sheet 1"), ("dash", "a-b"), ("umlaut", "Übersicht"),
+        ("cjk", "表1"), ("lf", "Sheet1&#10;"), ("lf2", "Sheet1&#10;&#10;"), ("underscore_first", "_a"), ("empty", ""),
+    ]],
     # Data validation prompts: 32 and 255 characters at most.
     ("x_dv_title_32_ok", dict(sheet_xml=sheet(after=DV(TALL)))),
     ("x_dv_title_33", dict(sheet_xml=sheet(after=DV(TALL + "y")))),

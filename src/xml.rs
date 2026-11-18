@@ -43,6 +43,9 @@ pub struct Reader<'a> {
     /// The whole buffer is valid UTF-8 with no illegal control characters:
     /// text and values need no per-piece check, and convert unchecked.
     pub clean: bool,
+    /// Clean, and no `&`, CR, tab or `]]>` anywhere: text needs no check, and
+    /// a value changes only where it holds a line feed.
+    pub plain: bool,
 }
 
 #[inline]
@@ -63,9 +66,13 @@ impl<'a> Reader<'a> {
         // A UTF-8 byte order mark is not content.
         let pos = if buf.starts_with(&[0xEF, 0xBB, 0xBF]) { 3 } else { 0 };
         // One vectorizable pass over the bytes, instead of a check per piece.
-        let control = buf.iter().fold(false, |any, &c| any | ((c < 0x20) & (c != b'\t') & (c != b'\r') & (c != b'\n')));
-        let clean = !control && std::str::from_utf8(buf).is_ok();
-        Reader { buf, pos, attrs: Vec::with_capacity(16), open: Vec::with_capacity(64), seen_root: false, clean }
+        // Branch-free OR reductions vectorize: control characters, and the bytes
+        // that make a text or value need a closer look (&, CR, tab).
+        let (control, special) = buf.iter().fold((false, false), |(ctl, sp), &c| (ctl | ((c < 0x20) & (c != b'\t') & (c != b'\r') & (c != b'\n')), sp | (c == b'&') | (c == b'\r') | (c == b'\t')));
+        // simdutf8 (after simdutf): the whole-part UTF-8 check at SIMD speed.
+        let clean = !control && simdutf8::basic::from_utf8(buf).is_ok();
+        let plain = clean && !special && memchr::memmem::find(buf, b"]]>").is_none();
+        Reader { buf, pos, attrs: Vec::with_capacity(16), open: Vec::with_capacity(64), seen_root: false, clean, plain }
     }
 
     pub fn offset(&self) -> usize {
@@ -113,7 +120,9 @@ impl<'a> Reader<'a> {
                     }
                     return err(at, "data at the root level is invalid");
                 }
-                check_text(raw, at, self.clean)?;
+                if !self.plain {
+                    check_text(raw, at, self.clean)?;
+                }
                 return Ok(Event::Text { raw, cdata: false });
             }
             match rest.get(1) {
@@ -207,7 +216,9 @@ impl<'a> Reader<'a> {
                             return err(vstart + len, "'<' in an attribute value");
                         }
                         let value = &self.buf[vstart..vstart + len];
-                        check_text(value, vstart, self.clean)?;
+                        if !self.plain {
+                            check_text(value, vstart, self.clean)?;
+                        }
                         if self.attrs.iter().any(|a| a.name == aname) {
                             return err(before, format!("'{}' is a duplicate attribute name", String::from_utf8_lossy(aname)));
                         }
@@ -295,7 +306,13 @@ pub fn unescape_in(raw: &[u8], attribute: bool, clean: bool) -> Cow<'_, str> {
     } else {
         std::str::from_utf8(raw).unwrap_or("")
     };
-    if memchr3(b'&', b'\r', if attribute { b'\t' } else { b'&' }, raw).is_none() && !(attribute && memchr(b'\n', raw).is_some()) {
+    // Most values are a few bytes, where a plain loop beats memchr's setup.
+    let special = if raw.len() < 32 {
+        raw.iter().any(|&c| c == b'&' || c == b'\r' || (attribute && (c == b'\t' || c == b'\n')))
+    } else {
+        memchr3(b'&', b'\r', if attribute { b'\t' } else { b'&' }, raw).is_some() || (attribute && memchr(b'\n', raw).is_some())
+    };
+    if !special {
         return Cow::Borrowed(s);
     }
     let mut out = String::with_capacity(s.len());

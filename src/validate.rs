@@ -8,7 +8,7 @@ use crate::strict;
 use crate::particle::{self, Kid, Verdict};
 use crate::schema::*;
 use crate::schema_gen::*;
-use crate::semantic::{self, Deferred, Facts, Outcome, Rels, Seen};
+use crate::semantic::{self, Attrs, Deferred, Facts, Outcome, Rels};
 use crate::values;
 use crate::xml::{Event, Reader, XmlError, unescape, unescape_in};
 use regex::Regex;
@@ -132,7 +132,7 @@ pub struct Part<'a> {
     frames: Vec<Frame<'a>>,
     /// Scratch, reused per element: present attributes (namespace id, local,
     /// value, name id, used) and declared attributes' values.
-    present: Vec<(u32, &'a [u8], Cow<'a, [u8]>, u32, bool)>,
+    present: Vec<(u32, &'a [u8], Cow<'a, [u8]>, bool)>,
     /// The package is Strict: namespaces and some values read as Transitional.
     strict: bool,
     /// The package's ApplicationType bit: constraints for other applications don't run.
@@ -274,7 +274,8 @@ impl<'a> Part<'a> {
                     // last first: the SDK's semantic pass meets them that way.
                     let mut dups: Vec<(&'a str, String)> =
                         self.unique.drain().flat_map(|(_, values)| values.into_iter().filter(|(v, (n, _))| *n > 1 && !v.is_empty()).map(|(v, (_, node))| (node, v))).collect();
-                    dups.sort_by_key(|(node, _)| std::cmp::Reverse(node.as_ptr() as usize));
+                    // Ties (one element, several values) in value order, so output is deterministic.
+                    dups.sort_by(|a, b| b.0.as_ptr().cmp(&a.0.as_ptr()).then_with(|| a.1.cmp(&b.1)));
                     for (node, v) in dups {
                         self.error_typed("Sem_UniqueAttributeValue", node, format!("Attribute has duplicate value '{v}'."), "Semantic");
                     }
@@ -288,7 +289,7 @@ impl<'a> Part<'a> {
                         if cdata {
                             self.text.push_str(std::str::from_utf8(raw).unwrap_or(""));
                         } else {
-                            self.text.push_str(&unescape(raw, false));
+                            self.text.push_str(&unescape_in(raw, false, self.reader.clean));
                         }
                     }
                 }
@@ -776,6 +777,7 @@ impl<'a> Part<'a> {
         let (s, n) = ty.attrs;
         let declared = &ATTRS[s as usize..s as usize + n as usize];
         let clean = self.reader.clean;
+        let plain = self.reader.plain;
         let mut present = std::mem::take(&mut self.present);
         let mut values = std::mem::take(&mut self.values);
         present.clear();
@@ -791,20 +793,22 @@ impl<'a> Part<'a> {
                 None => (0, name),
             };
             let value = Cow::Borrowed(strict::namespace(a.value, self.strict).unwrap_or(a.value));
-            present.push((ns, local, value, names().id(ns, local), false));
+            present.push((ns, local, value, false));
         }
         if self.strict
             && let Some(k) = strict::class(t)
         {
             let mut raw: Vec<strict::Raw<'a>> = present.drain(..).map(|p| (p.0, p.1, p.2)).collect();
             strict::translate(k, &mut raw);
-            present.extend(raw.into_iter().map(|(ns, l, v)| (ns, l, v, names().id(ns, l), false)));
+            present.extend(raw.into_iter().map(|(ns, l, v)| (ns, l, v, false)));
         }
-        for (k, a) in declared.iter().enumerate() {
-            let aid = names().attr[s as usize + k];
-            let value = present.iter_mut().find(|p| p.3 == aid).map(|p| {
-                p.4 = true;
+        for a in declared {
+            // A few short names: compared directly, not hashed (as quick-xml matches names).
+            let value = present.iter_mut().find(|p| p.0 == a.ns as u32 && p.1 == a.local.as_bytes()).map(|p| {
+                p.3 = true;
                 match &p.2 {
+                    // SAFETY: plain implies clean: valid UTF-8, split at ASCII.
+                    Cow::Borrowed(b) if plain && !b.contains(&b'\n') => Cow::Borrowed(unsafe { std::str::from_utf8_unchecked(b) }),
                     Cow::Borrowed(b) => unescape_in(b, true, clean),
                     Cow::Owned(o) => Cow::Owned(String::from_utf8_lossy(o).into_owned()),
                 }
@@ -814,7 +818,7 @@ impl<'a> Part<'a> {
         }
         self.semantics(t, declared, &values, qname);
         for p in &present {
-            let (ns, local, used) = (p.0, p.1, p.4);
+            let (ns, local, used) = (p.0, p.1, p.3);
             if used {
                 continue;
             }
@@ -835,11 +839,9 @@ impl<'a> Part<'a> {
         if ty.constraints.1 == 0 && !semantic::type_flags(t).0 {
             return;
         }
-        let seen: Vec<Seen> = declared.iter().zip(values).map(|(attr, v)| Seen { attr, value: v.as_deref() }).collect();
-        for &(ens, el, attr) in semantic::targets().0.iter().filter(|_| semantic::type_flags(t).0) {
-            if ens == ty.ns && el == ty.local
-                && let Some(v) = semantic::find(&seen, (0, attr)).and_then(|s| s.value).filter(|v| !v.is_empty())
-            {
+        let seen = Attrs { declared, values };
+        for &(ens, el, attr) in semantic::type_targets(t) {
+            if let Some(v) = semantic::find(declared, (0, attr)).and_then(|k| values[k].as_deref()).filter(|v| !v.is_empty()) {
                 self.facts.refs.entry((ens, el, attr)).or_default().insert(v.to_string());
             }
         }
@@ -848,7 +850,7 @@ impl<'a> Part<'a> {
             if CONSTRAINTS[i as usize].apps & self.app == 0 {
                 continue;
             }
-            match semantic::check(&CONSTRAINTS[i as usize], &seen, self.rels) {
+            match semantic::check(i as usize, seen, self.rels) {
                 Outcome::Pass => {}
                 Outcome::Error(id) => self.error_typed(id, qname, format!("Semantic constraint {:?} failed.", CONSTRAINTS[i as usize].kind), "Semantic"),
                 Outcome::Unique(v) => {

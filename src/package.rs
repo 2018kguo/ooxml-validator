@@ -488,7 +488,7 @@ pub fn validate(files: &Files, format: Format) -> Outcome {
         })
         .collect();
     jobs.sort_by_key(|j| std::cmp::Reverse(j.2.len()));
-    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(jobs.len()).min(4).max(1);
+    let threads = if std::env::var_os("OOXV_ONE").is_some() { 1 } else { std::thread::available_parallelism().map_or(1, |n| n.get()).min(jobs.len()).min(4).max(1) };
     let next = std::sync::atomic::AtomicUsize::new(0);
     let mut results: Vec<Option<crate::validate::PartResult>> = (0..nodes.len()).map(|_| None).collect();
     std::thread::scope(|scope| {

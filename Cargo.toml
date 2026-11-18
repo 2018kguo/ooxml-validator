@@ -17,6 +17,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 memchr = "2"
+simdutf8 = "0.1"
 rustc-hash = "2"
 # zip inflates through flate2; this selects its zlib-rs backend (faster than miniz_oxide).
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
