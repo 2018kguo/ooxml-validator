@@ -24,3 +24,4 @@ jobs:
       - run: WORK=$RUNNER_TEMP/agree fuzz/agree.sh
       # The npm package's WebAssembly build reports what the native one does.
       - run: scripts/build-npm.sh && node npm/same.mjs target/release/ooxml-validator $RUNNER_TEMP/agree/docs/all.txt
+      - run: timeout 30 node npm/pool-exits.mjs | grep "unawaited still delivered"

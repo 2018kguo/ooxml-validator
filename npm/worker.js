@@ -20,7 +20,6 @@ export function createValidatorPool({ threads = 1 } = {}) {
   const workers = Array.from({ length: threads }, () => {
     // The parent's flags (e.g. --input-type) need not suit a worker.
     const worker = new Worker(new URL(import.meta.url), { execArgv: [] });
-    worker.unref();
     return { worker, busy: 0 };
   });
   const pending = new Map();
@@ -29,20 +28,26 @@ export function createValidatorPool({ threads = 1 } = {}) {
     w.worker.on("message", ({ id, report, error }) => {
       const p = pending.get(id);
       pending.delete(id);
-      w.busy--;
+      // An idle pool never keeps the process alive; a busy worker does, so a
+      // caller awaiting a result gets it.
+      if (--w.busy === 0) w.worker.unref();
       if (error) p.reject(new Error(error));
       else p.resolve(report);
     });
     w.worker.on("error", (error) => {
       for (const [id, p] of pending) if (p.worker === w) (pending.delete(id), p.reject(error));
+      w.busy = 0;
+      w.worker.unref();
     });
+    // After the listeners: adding a "message" listener refs the worker again.
+    w.worker.unref();
   }
   return {
     /** @param {Uint8Array} docx @param {{ maxErrors?: number }} [options] */
     validate(docx, options) {
       const w = workers.reduce((a, b) => (b.busy < a.busy ? b : a));
       const id = next++;
-      w.busy++;
+      if (w.busy++ === 0) w.worker.ref();
       return new Promise((resolve, reject) => {
         pending.set(id, { resolve, reject, worker: w });
         w.worker.postMessage({ id, docx, options });
