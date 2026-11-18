@@ -125,7 +125,8 @@ def main():
             files = {n: z.read(n) for n in z.namelist()}
         except Exception:
             continue
-        parts = [n for n in files if n.startswith(("word/", "xl/", "ppt/")) and n.endswith(".xml") and len(files[n]) < 400_000]
+        # No DTDs: an entity bomb would expand without bound in minidom.
+        parts = [n for n in files if n.startswith(("word/", "xl/", "ppt/")) and n.endswith(".xml") and len(files[n]) < 400_000 and b"<!DOCTYPE" not in files[n]]
         if not parts:
             continue
         part = rng.choice(parts)
