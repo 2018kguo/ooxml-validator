@@ -48,6 +48,13 @@ pub struct Reader<'a> {
     pub plain: bool,
 }
 
+/// Byte equality for names: a few bytes, where an inline loop beats a call
+/// into the C library's memcmp (which `==` on slices becomes).
+#[inline]
+pub fn same(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x == y)
+}
+
 #[inline]
 fn is_name_start(c: u8) -> bool {
     c.is_ascii_alphabetic() || c == b'_' || c == b':' || c >= 0x80
@@ -136,7 +143,7 @@ impl<'a> Reader<'a> {
                     }
                     self.pos += 1;
                     match self.open.pop() {
-                        Some(open) if open == name => return Ok(Event::End { name }),
+                        Some(open) if same(open, name) => return Ok(Event::End { name }),
                         Some(open) => {
                             return err(at, format!("the '{}' start tag does not match the end tag of '{}'", String::from_utf8_lossy(open), String::from_utf8_lossy(name)));
                         }
@@ -219,7 +226,7 @@ impl<'a> Reader<'a> {
                         if !self.plain {
                             check_text(value, vstart, self.clean)?;
                         }
-                        if self.attrs.iter().any(|a| a.name == aname) {
+                        if self.attrs.iter().any(|a| same(a.name, aname)) {
                             return err(before, format!("'{}' is a duplicate attribute name", String::from_utf8_lossy(aname)));
                         }
                         self.attrs.push(RawAttr { name: aname, value });

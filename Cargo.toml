@@ -21,7 +21,9 @@ simdutf8 = "0.1"
 rustc-hash = "2"
 # zip inflates through flate2; this selects its zlib-rs backend (faster than miniz_oxide).
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
-regex = { version = "1", default-features = false, features = ["std", "perf", "unicode"] }
+# Only the Unicode classes the SDK's patterns use (\p{L}, \d); the patterns are short and run on
+# few values, so the lazy DFA alone is fast enough, and the build is ~500 KB smaller.
+regex = { version = "1", default-features = false, features = ["std", "perf-cache", "perf-dfa", "unicode-perl", "unicode-gencat"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [workspace]

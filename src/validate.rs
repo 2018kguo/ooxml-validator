@@ -804,7 +804,7 @@ impl<'a> Part<'a> {
         }
         for a in declared {
             // A few short names: compared directly, not hashed (as quick-xml matches names).
-            let value = present.iter_mut().find(|p| p.0 == a.ns as u32 && p.1 == a.local.as_bytes()).map(|p| {
+            let value = present.iter_mut().find(|p| p.0 == a.ns as u32 && crate::xml::same(p.1, a.local.as_bytes())).map(|p| {
                 p.3 = true;
                 match &p.2 {
                     // SAFETY: plain implies clean: valid UTF-8, split at ASCII.

@@ -4,7 +4,7 @@
 set -eu
 cd "$(dirname "$0")/.."
 # Panic messages embed source paths; keep the build machine's out of the shipped file.
-RUSTFLAGS="-C target-feature=+simd128 -C link-arg=--max-memory=1073741824 --remap-path-prefix=$HOME=~ --remap-path-prefix=$PWD=." cargo build -q --release --lib --target wasm32-unknown-unknown
+RUSTFLAGS="-C strip=symbols -C target-feature=+simd128 -C link-arg=--max-memory=1073741824 --remap-path-prefix=$HOME=~ --remap-path-prefix=$PWD=." cargo build -q --release --lib --target wasm32-unknown-unknown
 cp target/wasm32-unknown-unknown/release/ooxml_validator.wasm npm/
 cp README.md LICENSE NOTICE npm/
 ls -l npm/ooxml_validator.wasm

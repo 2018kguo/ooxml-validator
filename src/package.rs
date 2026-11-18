@@ -488,7 +488,8 @@ pub fn validate(files: &Files, format: Format) -> Outcome {
         })
         .collect();
     jobs.sort_by_key(|j| std::cmp::Reverse(j.2.len()));
-    let threads = if std::env::var_os("OOXV_ONE").is_some() { 1 } else { std::thread::available_parallelism().map_or(1, |n| n.get()).min(jobs.len()).min(4).max(1) };
+    // OOXML_VALIDATOR_ONE_THREAD: one thread, for profiles comparable with the WebAssembly build.
+    let threads = if std::env::var_os("OOXML_VALIDATOR_ONE_THREAD").is_some() { 1 } else { std::thread::available_parallelism().map_or(1, |n| n.get()).min(jobs.len()).min(4).max(1) };
     let next = std::sync::atomic::AtomicUsize::new(0);
     let mut results: Vec<Option<crate::validate::PartResult>> = (0..nodes.len()).map(|_| None).collect();
     std::thread::scope(|scope| {
@@ -765,7 +766,16 @@ pub fn check_as(bytes: &[u8], format: Option<Format>) -> Report {
         // an entry: it stops there, doesn't check the CRC-32, and ends a deflate
         // stream that runs out of input. What it read is then parsed as XML.
         let mut xml = Vec::with_capacity(size as usize);
-        if let Err(e) = f.take(size).read_to_end(&mut xml) {
+        let method = f.compression();
+        drop(f);
+        // Read without the zip crate's CRC-32, which .NET doesn't check either:
+        // the same zlib-rs inflate over the raw bytes, a few percent less work.
+        let read = match method {
+            zip::CompressionMethod::Deflated => zip.by_index_raw(i).map_err(std::io::Error::other).and_then(|raw| flate2::bufread::DeflateDecoder::new(std::io::BufReader::new(raw)).take(size).read_to_end(&mut xml)),
+            zip::CompressionMethod::Stored => zip.by_index_raw(i).map_err(std::io::Error::other).and_then(|raw| raw.take(size).read_to_end(&mut xml)),
+            _ => zip.by_index(i).map_err(std::io::Error::other).and_then(|f| f.take(size).read_to_end(&mut xml)),
+        };
+        if let Err(e) = read {
             let m = e.to_string();
             if !m.contains("checksum") && !m.contains("incomplete deflate stream") {
                 corrupt = Some(format!("'{name}' cannot be read: {m}"));
