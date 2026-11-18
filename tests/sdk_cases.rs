@@ -70,6 +70,14 @@ fn xpaths() {
     other.sort();
     let invalid = "Sch_InvalidElementContentExpectingComplex";
     assert_eq!(other, [(invalid, "/w:document[1]/w:body[1]/w:p[1]".to_string()), (invalid, "/w:document[1]/w:body[1]/w:p[1]/x:r[1]".to_string())]);
+    // Strict reads as Transitional: a default namespace gets the SDK's prefix,
+    // and Strict and Transitional siblings count together.
+    let strict = |document: &str| ooxml_validator::package::check(&docx_rel(STRICT, document)).errors.into_iter().map(|e| e.xpath.unwrap_or_default()).collect::<Vec<_>>();
+    assert_eq!(strict(r#"<document xmlns="http://purl.oclc.org/ooxml/wordprocessingml/main"><body><p><bogus/></p></body></document>"#), ["/w:document[1]/w:body[1]/w:p[1]"]);
+    assert_eq!(
+        strict(r#"<w:document xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main" xmlns:t="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p/><t:p/><w:p><w:bogus/></w:p></w:body></w:document>"#),
+        ["/w:document[1]/w:body[1]/w:p[3]"]
+    );
 }
 
 #[test]

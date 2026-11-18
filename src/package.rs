@@ -454,7 +454,7 @@ pub fn validate(files: &Files) -> Outcome {
         .into_iter()
         .filter_map(|(part, at)| {
             let xml = files.get(part.strip_prefix('/')?)?.1;
-            Some((part, crate::xpath::xpaths(xml, &at)))
+            Some((part, crate::xpath::xpaths(xml, &at, strict)))
         })
         .collect();
     for e in &mut errors {

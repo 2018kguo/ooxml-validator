@@ -76,7 +76,12 @@ export function createValidatorPool({ threads = 1, onReplace } = {}) {
     workers[slot] = fresh;
     failed?.reject(error);
     for (const [id, call] of queued) send(fresh, id, call);
-    onReplace?.(reason);
+    // A listener that throws must not break the pool; its error surfaces as a warning.
+    try {
+      onReplace?.(reason);
+    } catch (e) {
+      process.emitWarning(`ooxml-validator onReplace threw: ${e?.stack ?? e}`);
+    }
   }
 
   function start() {
@@ -85,12 +90,11 @@ export function createValidatorPool({ threads = 1, onReplace } = {}) {
     const w = { worker, pending: new Map(), retiring: false };
     worker.on("message", ({ id, report, error, recycle }) => {
       const call = settle(w, id);
+      if (error) call?.reject(new Error(error));
+      else call?.resolve(report);
       // No new work goes to a retiring worker; once idle, a new one replaces it.
       w.retiring ||= Boolean(recycle);
       if (w.retiring && w.pending.size === 0) replace(w, undefined, "memory");
-      if (!call) return;
-      if (error) call.reject(new Error(error));
-      else call.resolve(report);
     });
     // Crashed or out of memory: the call it was running fails, the rest move on.
     const gone = (error) => {
