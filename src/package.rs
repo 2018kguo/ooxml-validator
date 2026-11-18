@@ -150,21 +150,43 @@ fn percent_decode(s: &str) -> String {
 /// relationship without Id, Type or Target, a repeated Id, a bad TargetMode.
 fn relationships(xml: &[u8]) -> Result<Vec<(String, String, String, bool)>, String> {
     let mut out: Vec<(String, String, String, bool)> = vec![];
+    const NS: &[u8] = b"http://schemas.openxmlformats.org/package/2006/relationships";
     let mut r = Reader::new(xml);
     let mut root = true;
+    // In-scope namespace declarations (prefix, URI) and each open element's mark:
+    // the elements must be in the relationships namespace, not just named so.
+    let mut scopes: Vec<(Vec<u8>, Vec<u8>)> = vec![];
+    let mut marks: Vec<usize> = vec![];
     loop {
         match r.next().map_err(|e| e.message)? {
             Event::Eof => return Ok(out),
-            Event::Start { name, .. } => {
-                let local = name.rsplit(|&c| c == b':').next().unwrap_or(name);
+            Event::End { .. } => scopes.truncate(marks.pop().unwrap_or(0)),
+            Event::Start { name, empty } => {
+                marks.push(scopes.len());
+                for a in &r.attrs {
+                    if a.name == b"xmlns" {
+                        scopes.push((vec![], a.value.to_vec()));
+                    } else if let Some(p) = a.name.strip_prefix(b"xmlns:") {
+                        scopes.push((p.to_vec(), a.value.to_vec()));
+                    }
+                }
+                let (prefix, local) = match memchr::memchr(b':', name) {
+                    Some(i) => (&name[..i], &name[i + 1..]),
+                    None => (&b""[..], name),
+                };
+                let ns = scopes.iter().rev().find(|s| s.0 == prefix).map_or(&b""[..], |s| &s.1[..]);
+                let ours = ns == NS;
+                if empty {
+                    scopes.truncate(marks.pop().unwrap_or(0));
+                }
                 if root {
                     root = false;
-                    if local != b"Relationships" {
+                    if local != b"Relationships" || !ours {
                         return Err("Relationships tag expected at root level.".into());
                     }
                     continue;
                 }
-                if local != b"Relationship" {
+                if local != b"Relationship" || !ours {
                     return Err("Unrecognized tag found in Relationships XML.".into());
                 }
                 let get = |k: &[u8]| r.attrs.iter().find(|a| a.name == k).map(|a| String::from_utf8_lossy(a.value).into_owned());
@@ -723,7 +745,8 @@ pub fn check_as(bytes: &[u8], format: Option<Format>) -> Report {
             }
         };
         let name = f.name().to_string();
-        if !seen.insert(name.to_lowercase()) {
+        // Folders are not parts: "ppt/" and "PPT/" don't clash.
+        if !name.ends_with('/') && !seen.insert(name.to_lowercase()) {
             return fail(format!("{noun} contains ambiguous duplicate ZIP part names."));
         }
         names.insert(key(&name), name.clone());
