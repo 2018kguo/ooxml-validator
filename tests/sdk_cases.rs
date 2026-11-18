@@ -167,3 +167,16 @@ fn package_load_failures_are_open_errors() {
     assert!(!opens(&rels(r#"<Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="nowhere.xml"/>"#)));
     assert!(!opens(&rels(r#"<Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="NULL"/>"#)));
 }
+
+#[test]
+fn large_part_is_read_whole() {
+    // A part over half the 128 MB XML budget was read short and reported as
+    // unclosed XML: the read limit came from the budget left after it.
+    let p = "<w:p><w:r><w:t>The same sentence, many times over, makes a large part.</w:t></w:r></w:p>";
+    let body = p.repeat(70_000_000 / p.len());
+    let doc = format!(r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body}</w:body></w:document>"#);
+    assert!(doc.len() > 64 << 20);
+    let report = ooxml_validator::package::check(&docx(&doc));
+    assert_eq!(report.open_error, None);
+    assert!(report.errors.is_empty(), "{:?}", report.errors.first().map(|e| &e.description));
+}

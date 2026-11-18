@@ -32,6 +32,9 @@ pub struct ValidationError {
     pub location: Option<(u32, u32)>,
 }
 
+/// The most errors one part keeps.
+pub const MAX_PART_ERRORS: usize = 1000;
+
 /// The (line, column) of a byte offset, as XmlReader counts them (from 1).
 pub fn line_column(xml: &[u8], at: usize) -> (u32, u32) {
     let before = &xml[..at.min(xml.len())];
@@ -211,6 +214,12 @@ impl<'a> Part<'a> {
     }
 
     fn error_typed(&mut self, id: &'static str, node: &str, description: String, error_type: &'static str) {
+        // The SDK stops at 1000 errors (MaxNumberOfErrors), and so does the
+        // report: keeping more only costs memory. A small file with millions of
+        // bad elements would otherwise hold millions of errors.
+        if self.errors.len() >= MAX_PART_ERRORS {
+            return;
+        }
         self.errors.push(ValidationError { id, description, part: self.part.to_string(), node: node.to_string(), error_type, location: None });
     }
 

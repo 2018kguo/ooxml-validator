@@ -127,6 +127,9 @@ The SDK is the reference, quirks included, and the tests check against the SDK i
 - Word documents only (.docx, .docm, .dotx). Not Excel or PowerPoint.
 - The Microsoft365 file format only, the newest the SDK knows.
 - Error descriptions and order differ from the SDK's; the set of error ids doesn't.
+- Bounded where the SDK isn't: a .docx over 100 MB, or more than 128 MB of XML in
+  all, is refused with an open error; each part keeps its first 1,000 errors (the
+  SDK stops at 1,000 in all); the WebAssembly build stops at 1 GiB of memory.
 - Pinned to SDK 3.5.1 until the weekly job proposes a newer one.
 
 ## License

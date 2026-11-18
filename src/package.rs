@@ -548,11 +548,16 @@ pub fn check(bytes: &[u8]) -> Report {
         if f.size() > budget {
             return fail("DOCX XML exceeds the 128 MB validation limit.".into());
         }
-        budget -= f.size();
-        // Exactly the declared size, read in one go; never more than the budget.
-        let mut xml = Vec::with_capacity(f.size() as usize);
-        if let Err(e) = f.take(budget + 1).read_to_end(&mut xml) {
+        let size = f.size();
+        budget -= size;
+        // Exactly the declared size, read in one go: an entry that inflates past
+        // it is refused rather than allowed to outgrow the budget.
+        let mut xml = Vec::with_capacity(size as usize);
+        if let Err(e) = f.take(size + 1).read_to_end(&mut xml) {
             return fail(e.to_string());
+        }
+        if xml.len() as u64 > size {
+            return fail(format!("'{name}' inflates past its declared size."));
         }
         // Parts in UTF-16 or Latin-1 are read as text, as XmlReader reads them.
         match crate::encoding::to_utf8(&xml) {
