@@ -171,4 +171,27 @@ runs showed it, and only with every document still agreeing):
   packed integers; element and attribute names interned to ids.
 - Each zip entry inflated once (zlib-rs), parts validated on up to four
   threads, largest first.
-- The UTF-8 and control-character check done once per part, not per token.
+- The UTF-8 and control-character check done once per part, not per token
+  (simdutf8, after simdutf). A part with no `&`, CR, tab or `]]>` anywhere
+  skips the per-text checks, and its values convert without a scan (the
+  escape fast path verso's writer takes in the other direction).
+- Each semantic constraint's attributes resolved once, by index into its
+  type's declared attributes, instead of by name on every element; an
+  element's attributes handed to constraints as a borrowed view. A cell has
+  nine constraints, so this was a quarter of a large sheet's time.
+- Short names compared in an inline loop: `==` on byte slices becomes a call
+  into the C library's memcmp, which costs more than a three-byte name.
+- Zip entries inflated from their raw bytes, without the zip crate's CRC-32,
+  which .NET doesn't check either.
+
+Measured with `OOXML_VALIDATOR_ONE_THREAD=1` (one thread, as the WebAssembly
+build runs) and `samply`, A/B'd by cycles and instructions retired
+(`/usr/bin/time -l`), and checked byte for byte against the previous build's
+output on every corpus document before each change was kept.
+
+WebAssembly runs 1.5–1.8× the single-threaded native time. The rest of the
+gap to the native CLI is threads: native validates a workbook's sheets on up
+to four, WebAssembly on one. Its size is mostly schema tables (2.5 MB of
+data, 390 KB gzipped); the regex crate keeps only the Unicode classes the
+SDK's patterns use, and the shipped file has no name section. `wasm-opt -O3`
+and `-Oz` made the file smaller raw but larger gzipped, and no faster.

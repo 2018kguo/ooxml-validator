@@ -1,6 +1,6 @@
 [package]
 name = "ooxml-validator"
-version = "0.3.0"
+version = "0.3.1"
 license = "MIT"
 description = "A streaming .docx, .xlsx and .pptx validator that gives the Open XML SDK's verdicts"
 edition = "2024"

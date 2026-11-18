@@ -1,5 +1,25 @@
 # Changelog
 
+## npm 0.2.1, crate 0.3.1
+
+Faster, and one fix.
+
+- A sheet's `codeName` is checked against the SDK's pattern. The pattern used
+  .NET's `IsBasicLatin` block, which the regex crate doesn't know; it failed to
+  compile, so every code name passed where the SDK rejects `1Sheet` or
+  `Sheet 1`. Every constraint pattern must now compile, and a pattern's final
+  `$` also matches before one trailing line feed, as in .NET.
+- Large sheets validate 25–30% faster, natively and in WebAssembly: each
+  constraint finds its attributes once, not by name per cell; plain parts skip
+  per-text checks; short names compare without memcmp; entries inflate without
+  a CRC pass.
+- The WebAssembly file is 3.3 MB, 680 KB gzipped (from 3.9 MB, 850 KB): regex
+  keeps only the Unicode classes the patterns use, and the name section is
+  stripped.
+
+npm 0.2.0 and crate 0.3.0 were tagged but never published; this release
+replaces them.
+
 ## npm 0.2.0, crate 0.3.0
 
 Excel and PowerPoint. A workbook (.xlsx, .xlsm, .xltx, .xltm, .xlam) or a
