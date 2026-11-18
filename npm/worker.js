@@ -62,7 +62,8 @@ export function createValidatorPool({ threads = 1 } = {}) {
     const runningId = running(w);
     const queued = [...w.pending].filter(([id]) => id !== runningId);
     const failed = runningId === undefined ? undefined : settle(w, runningId);
-    for (const [id] of queued) settle(w, id);
+    // Queued calls keep their timers: a deadline still counts on the new worker
+    // (the timer finds a call wherever it is pending).
     w.pending.clear();
     void w.worker.terminate();
     if (closed) {

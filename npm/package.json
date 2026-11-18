@@ -1,6 +1,6 @@
 {
   "name": "@2018kguo/ooxml-validator",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Validate .docx files exactly as Microsoft's Open XML SDK does, without .NET: Rust compiled to WebAssembly.",
   "license": "MIT",
   "type": "module",
