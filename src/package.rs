@@ -299,15 +299,31 @@ impl Files {
         self.overrides.get(path).or_else(|| self.defaults.get(&path.rsplit_once('.')?.1.to_lowercase())).map(String::as_str)
     }
 
-    /// The format the main part's content type names: the package's
-    /// officeDocument relationship, as each package class finds its main part.
+    /// The format the main part names (the package's officeDocument
+    /// relationship, as each package class finds its main part): by its
+    /// content type, or else by its root element; Word when neither does.
     pub fn format(&self) -> Format {
         const MAIN: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
         let rels = self.get("_rels/.rels").and_then(|(_, x)| relationships(x).ok()).unwrap_or_default();
-        rels.iter()
-            .filter(|r| r.1 == MAIN && !r.3)
-            .find_map(|r| Format::from_content_type(self.content_type(&resolve("", &r.2))?))
-            .unwrap_or(Format::Word)
+        let Some(main) = rels.iter().find(|r| r.1 == MAIN && !r.3).map(|r| resolve("", &r.2)) else { return Format::Word };
+        if let Some(f) = self.content_type(&main).and_then(Format::from_content_type) {
+            return f;
+        }
+        let mut r = Reader::new(self.get(&main).map_or(&[][..], |e| e.1));
+        while let Ok(e) = r.next() {
+            match e {
+                Event::Start { name, .. } => {
+                    return match name.rsplit(|&c| c == b':').next() {
+                        Some(b"workbook") => Format::Excel,
+                        Some(b"presentation") => Format::PowerPoint,
+                        _ => Format::Word,
+                    };
+                }
+                Event::Eof => break,
+                _ => {}
+            }
+        }
+        Format::Word
     }
 
     fn get(&self, name: &str) -> Option<(usize, &[u8])> {
@@ -500,7 +516,7 @@ pub fn validate(files: &Files, format: Format) -> Outcome {
         };
         if known & bit == 0 {
             let part = n.map_or(String::new(), |n| format!("/{}", nodes[n].path));
-            structure.push(ValidationError { id: "Pkg_DataPartReferenceIsNotAllowed", description: format!("A part here cannot reference a data part of type {rel}"), part, node: String::new(), location: None, error_type: "Package" });
+            structure.push(ValidationError { id: "Pkg_DataPartReferenceIsNotAllowed", description: format!("A part here cannot reference a data part of type {rel}"), part, node: String::new(), location: None, error_type: "Package", xpath: None, at: None });
         }
     }
     let containers = std::iter::once((Some(package), None, &top)).chain(nodes.iter().map(|n| (n.class, Some(n.path.as_str()), &n.children)));
@@ -530,6 +546,7 @@ pub fn validate(files: &Files, format: Format) -> Outcome {
     structure.append(&mut errors);
     let mut errors = structure;
     // Package-level constraints, now every part is known.
+    let mut semantic_errors = vec![0usize; nodes.len()];
     for (n, d) in deferred {
         let c = &CONSTRAINTS[d.constraint as usize];
         let Arg::S(path) = c.args[1] else { continue };
@@ -553,7 +570,14 @@ pub fn validate(files: &Files, format: Format) -> Outcome {
             _ => continue,
         };
         if !ok {
-            errors.push(ValidationError { id, description: format!("{:?} failed for '{}'.", c.kind, d.value), part: format!("/{}", nodes[n].path), node: d.node, error_type: "Semantic", location: None, xpath: None, at: d.at });
+            // One error per element, as the SDK reports them; a part keeps its first thousand.
+            let room = crate::validate::MAX_PART_ERRORS.saturating_sub(semantic_errors[n]);
+            let k = (d.count as usize).min(room);
+            semantic_errors[n] += k;
+            for i in 0..k {
+                let at = d.ats.get(i).copied().flatten();
+                errors.push(ValidationError { id, description: format!("{:?} failed for '{}'.", c.kind, d.value), part: format!("/{}", nodes[n].path), node: d.node.clone(), error_type: "Semantic", location: None, xpath: None, at });
+            }
         }
     }
     // XPaths, from one more pass over each part that has errors.

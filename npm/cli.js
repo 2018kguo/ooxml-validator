@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// ooxml-validator [--json] [--max-errors N] FILE.docx...: the Rust CLI's interface.
+// ooxml-validator [--json] [--max-errors N] FILE.docx|.xlsx|.pptx...: the Rust CLI's interface.
 import { readFile } from "node:fs/promises";
 import { validate } from "./index.js";
 
@@ -12,14 +12,21 @@ for (let i = 0; i < args.length; i++) {
   else paths.push(args[i]);
 }
 if (!paths.length || Number.isNaN(maxErrors)) {
-  console.error("usage: ooxml-validator [--json] [--max-errors N] FILE.docx...");
+  console.error("usage: ooxml-validator [--json] [--max-errors N] FILE.docx|.xlsx|.pptx...");
   process.exit(2);
 }
+// Opened as the package class the extension names, as the native CLI does.
+const extension = (path) => path.slice(path.lastIndexOf(".") + 1).toLowerCase();
+const format = (path) =>
+  ["docx", "docm", "dotx", "dotm"].includes(extension(path)) ? "word"
+  : ["xlsx", "xlsm", "xltx", "xltm", "xlam"].includes(extension(path)) ? "excel"
+  : ["pptx", "pptm", "potx", "potm", "ppsx", "ppsm", "ppam"].includes(extension(path)) ? "powerpoint"
+  : undefined;
 let ok = true;
 for (const path of paths) {
   let r;
   try {
-    r = await validate(await readFile(path), { maxErrors });
+    r = await validate(await readFile(path), { maxErrors, format: format(path) });
   } catch (e) {
     r = { ok: false, openError: e.message, errors: [] };
   }

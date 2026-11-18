@@ -1,4 +1,4 @@
-import type { Report } from "./index.js";
+import type { Format, Report } from "./index.js";
 
 export interface ValidatorPool {
   /**
@@ -6,7 +6,7 @@ export interface ValidatorPool {
    * then rejects with a `TimeoutError`; if it was running, its worker is
    * replaced and the calls queued behind it move to the new one.
    */
-  validate(docx: Uint8Array, options?: { maxErrors?: number; timeoutMs?: number }): Promise<Report>;
+  validate(docx: Uint8Array, options?: { maxErrors?: number; format?: Format; timeoutMs?: number }): Promise<Report>;
   close(): Promise<unknown>;
   [Symbol.dispose](): void;
 }

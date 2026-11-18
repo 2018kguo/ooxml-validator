@@ -1,8 +1,9 @@
-"""Mutation fuzzer: writes .docx variants with a few random edits each.
+"""Mutation fuzzer: writes .docx, .xlsx and .pptx variants with a few random
+edits each.
 
 usage: python3 fuzz/mutate.py LIST OUT_DIR COUNT [SEED]
-  LIST: one source .docx per line. Each mutant edits one XML part of a
-  source (document, styles, numbering, settings, headers...) with 1-3 of:
+  LIST: one source package per line. Each mutant edits one XML part of a
+  source (document, styles, sheets, slides, charts, drawings...) with 1-3 of:
   delete / duplicate / swap / move an element, rename it to a sibling's
   name, drop / add / perturb an attribute, wrap it in mc:AlternateContent,
   add an unknown or ignorable child. Feed OUT_DIR's list.txt to diff.py.
@@ -69,7 +70,7 @@ def mutate(doc, rng):
         e.removeAttribute(rng.choice(keys))
     elif op == "add_attr":
         prefix = e.tagName.split(":")[0] if ":" in e.tagName else None
-        local = rng.choice(["val", "id", "w", "type", "color", "space", "ascii", "fill", "name", "bogus"])
+        local = rng.choice(["val", "id", "w", "type", "color", "space", "ascii", "fill", "name", "bogus", "r", "s", "t", "sheetId", "xfId", "ref", "sqref", "spid"])
         e.setAttribute(f"{prefix}:{local}" if prefix else local, rng.choice(VALUES))
     elif op == "perturb":
         keys = [k for k in e.attributes.keys() if not k.startswith("xmlns")]
@@ -80,7 +81,7 @@ def mutate(doc, rng):
         root.setAttribute("xmlns:mc", MC)
         ac = doc.createElement("mc:AlternateContent")
         choice = doc.createElement("mc:Choice")
-        req = rng.choice(["w14", "wps", "w15", "zz", "w"])
+        req = rng.choice(["w14", "wps", "w15", "zz", "w", "x14", "p14", "a14"])
         choice.setAttribute("Requires", req)
         fallback = doc.createElement("mc:Fallback")
         parent.replaceChild(ac, e)
@@ -90,7 +91,7 @@ def mutate(doc, rng):
             fallback.appendChild(e.cloneNode(True))
             ac.appendChild(fallback)
     elif op == "unknown_child":
-        e.appendChild(doc.createElement(rng.choice(["w:bogus", "zz:thing", "w14:bogus", "unprefixed"])))
+        e.appendChild(doc.createElement(rng.choice(["w:bogus", "zz:thing", "w14:bogus", "unprefixed", "x:bogus", "a:bogus"])))
         if "zz:" in e.lastChild.tagName:
             root.setAttribute("xmlns:zz", "urn:example:zz")
     elif op == "ignorable_child":
@@ -118,10 +119,13 @@ def main():
         src = rng.choice(sources)
         try:
             z = zipfile.ZipFile(src)
+            # Test corpora hold zip bombs: skip a source that inflates past 64 MB.
+            if sum(i.file_size for i in z.infolist()) > 64 << 20:
+                continue
             files = {n: z.read(n) for n in z.namelist()}
         except Exception:
             continue
-        parts = [n for n in files if n.startswith("word/") and n.endswith(".xml") and len(files[n]) < 400_000]
+        parts = [n for n in files if n.startswith(("word/", "xl/", "ppt/")) and n.endswith(".xml") and len(files[n]) < 400_000]
         if not parts:
             continue
         part = rng.choice(parts)
@@ -131,7 +135,7 @@ def main():
             continue
         ops = [mutate(doc, rng) for _ in range(rng.randint(1, 3))]
         files[part] = doc.toxml(encoding="UTF-8")
-        name = os.path.join(out, f"m{len(made):05d}.docx")
+        name = os.path.join(out, f"m{len(made):05d}{os.path.splitext(src)[1].lower()}")
         with zipfile.ZipFile(name, "w", zipfile.ZIP_DEFLATED) as o:
             for n, b in files.items():
                 o.writestr(n, b)

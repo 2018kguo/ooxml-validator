@@ -150,6 +150,9 @@ pub struct Part<'a> {
     unique: HashMap<u32, HashMap<String, (u32, &'a str)>>,
     pub facts: Facts,
     pub deferred: Vec<Deferred>,
+    /// Each deferred (constraint, value)'s index: a style index read on every
+    /// cell of a sheet is kept once, with its count.
+    deferred_at: rustc_hash::FxHashMap<u32, rustc_hash::FxHashMap<String, usize>>,
     /// Per open AlternateContent: the errors its own MC attributes raised,
     /// which the SDK raises again for each Choice and Fallback.
     ac_mc: Vec<Vec<ValidationError>>,
@@ -172,6 +175,7 @@ impl<'a> Part<'a> {
             ac_mc: vec![],
             facts: Facts::default(),
             deferred: vec![],
+            deferred_at: Default::default(),
             reader: Reader::new(xml),
             xml,
             part,
@@ -852,7 +856,23 @@ impl<'a> Part<'a> {
                     let e = self.unique.entry(i).or_default().entry(v).or_insert((0, qname));
                     *e = (e.0 + 1, qname);
                 }
-                Outcome::Defer(value) => self.deferred.push(Deferred { constraint: i, value, node: qname.to_string(), at: self.at(qname) }),
+                Outcome::Defer(value) => {
+                    let el = self.at(qname);
+                    let at = self.deferred_at.entry(i).or_default();
+                    match at.get(value) {
+                        Some(&k) => {
+                            let d = &mut self.deferred[k];
+                            d.count += 1;
+                            if d.ats.len() < MAX_PART_ERRORS {
+                                d.ats.push(el);
+                            }
+                        }
+                        None => {
+                            at.insert(value.to_string(), self.deferred.len());
+                            self.deferred.push(Deferred { constraint: i, value: value.to_string(), node: qname.to_string(), ats: vec![el], count: 1 });
+                        }
+                    }
+                }
             }
         }
     }

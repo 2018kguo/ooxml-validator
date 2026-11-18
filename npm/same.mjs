@@ -1,5 +1,7 @@
 // node npm/same.mjs NATIVE_BIN LIST: the WebAssembly build reports exactly what
-// the native build does (ok, open error, error ids) on every file in LIST.
+// the native build does (ok, open error, error ids) on every file in LIST. The
+// native CLI opens a file as its extension says; here the package's own main
+// part decides, so this also checks that detection.
 import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { validate } from "./index.js";

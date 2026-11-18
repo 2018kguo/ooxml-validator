@@ -25,12 +25,15 @@ pub struct Facts {
     pub counts: HashMap<Option<(u16, &'static str)>, usize>,
 }
 
-/// A check that needs another part: its constraint and the value it read.
+/// A check that needs another part: its constraint and the value it read,
+/// on how many elements (the first one's name).
 pub struct Deferred {
     pub constraint: u32,
     pub value: String,
     pub node: String,
-    pub at: Option<usize>,
+    /// Where each element is (the first thousand), for its XPath.
+    pub ats: Vec<Option<usize>>,
+    pub count: u32,
 }
 
 /// An attribute as constraints see it (AttributeEntry): declared, maybe present.
@@ -103,9 +106,12 @@ fn patterns() -> &'static HashMap<&'static str, Regex> {
 /// SemanticConstraint.TryFindAttribute: a declared attribute by local name,
 /// preferring one in the given namespace.
 pub fn find<'s, 'v>(seen: &'s [Seen<'v>], (ns, local): (u16, &str)) -> Option<&'s Seen<'v>> {
+    // Names are a few bytes: compared inline rather than through memcmp,
+    // since a cell runs this for each of its constraints.
+    let same = |a: &str| a.len() == local.len() && a.bytes().zip(local.bytes()).all(|(x, y)| x == y);
     let mut found = None;
     for s in seen {
-        if s.attr.local == local {
+        if same(s.attr.local) {
             found = Some(s);
             if s.attr.ns == ns {
                 return found;
@@ -197,16 +203,16 @@ fn strings(a: &Arg) -> &'static [&'static str] {
 }
 
 /// Outcome of one constraint on one element.
-pub enum Outcome {
+pub enum Outcome<'v> {
     Pass,
     Error(&'static str),
     /// A value to count for uniqueness in this part.
     Unique(String),
-    Defer(String),
+    Defer(&'v str),
 }
 
 /// Runs an element-level constraint against an element's attributes.
-pub fn check(c: &Constraint, seen: &[Seen], rels: &Rels) -> Outcome {
+pub fn check<'v>(c: &Constraint, seen: &[Seen<'v>], rels: &Rels) -> Outcome<'v> {
     use ConstraintKind::*;
     use Outcome::*;
     let a = c.args;
@@ -292,9 +298,9 @@ pub fn check(c: &Constraint, seen: &[Seen], rels: &Rels) -> Outcome {
             let Arg::S(want) = a[1] else { return Pass };
             fail(rels.types.get(v).is_some_and(|t| t != want), "Sem_IncorrectRelationshipType")
         }
-        ReferenceExist => nonempty(seen, &a[0]).map_or(Pass, |v| Defer(v.to_string())),
+        ReferenceExist => nonempty(seen, &a[0]).map_or(Pass, Defer),
         IndexReference => match nonempty(seen, &a[0]).map(|v| (v, v.parse::<i32>())) {
-            Some((v, Ok(_))) => Defer(v.to_string()),
+            Some((v, Ok(_))) => Defer(v),
             _ => Pass,
         },
     }

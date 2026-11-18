@@ -111,12 +111,12 @@ export function createValidatorPool({ threads = 1, onReplace } = {}) {
   return {
     /**
      * @param {Uint8Array} docx
-     * @param {{ maxErrors?: number, timeoutMs?: number }} [options]
+     * @param {{ maxErrors?: number, format?: "word" | "excel" | "powerpoint", timeoutMs?: number }} [options]
      */
     validate(docx, { timeoutMs, ...options } = {}) {
       if (closed) return Promise.reject(new Error("the validator pool is closed"));
       // The validator refuses these anyway; refuse before copying them to a thread.
-      if (docx.length > MAX_DOCX_BYTES) return Promise.resolve(tooLarge());
+      if (docx.length > MAX_DOCX_BYTES) return Promise.resolve(tooLarge(options.format));
       const load = (x) => (x.retiring ? Infinity : x.pending.size);
       const w = workers.reduce((a, b) => (load(b) < load(a) ? b : a));
       const id = next++;
