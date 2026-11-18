@@ -34,7 +34,7 @@ jobs:
           registry-url: https://registry.npmjs.org
       - run: cargo test --release --workspace
       # Nothing ships unless it agrees with the pinned SDK.
-      - run: WORK=$RUNNER_TEMP/agree fuzz/agree.sh
+      - run: WORK=$RUNNER_TEMP/agree CORPORA=1 fuzz/agree.sh
       - run: scripts/build-npm.sh && node npm/same.mjs target/release/ooxml-validator $RUNNER_TEMP/agree/docs/all.txt
       - run: timeout 30 node npm/pool-exits.mjs | grep "unawaited still delivered"
       - run: python3 bench/generate.py $RUNNER_TEMP/report.docx 400 && timeout 60 node npm/pool-timeout.mjs $RUNNER_TEMP/report.docx

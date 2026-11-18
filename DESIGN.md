@@ -2,7 +2,8 @@
 
 Goal: give the same verdict as Microsoft's Open XML SDK validator
 (`OpenXmlValidator(FileFormatVersions.Microsoft365)`, DocumentFormat.OpenXml
-3.5.1) on WordprocessingML packages, an order of magnitude faster, with no .NET.
+3.5.1) on WordprocessingML, SpreadsheetML and PresentationML packages, an order
+of magnitude faster, with no .NET.
 
 ## Why
 
@@ -31,7 +32,8 @@ particle validators (greedy Sequence/Choice/All/Any/Group, as the SDK runs them)
 version-gated validators and enum members, union semantics, simple-type
 parsing (`Int32Value`, `OnOffValue`, `HexBinaryValue`, ...), markup
 compatibility (Ignorable, AlternateContent, ProcessContent), unknown elements,
-semantic constraints (with Application = Word filtering), package validation.
+semantic constraints (each run only when `(Application & app) == app`, app being
+Word, Excel or PowerPoint as the package class says), package validation.
 
 Checked by differential runs against the SDK (`fuzz/oracle`, `fuzz/diff.py`)
 on real-world documents and on mutants of them (`fuzz/mutate.py`: delete,
@@ -103,10 +105,42 @@ reports an open error instead of a list of errors:
   Id, a TargetMode other than Internal/External; `[Content_Types].xml`
   declaring a Default or Override twice. Overrides match part names with case;
   parts are found without case, percent-decoded.
+- Zip entries as .NET's ZipArchive reads them: at most the declared size, no
+  CRC check, an incomplete deflate stream ends the entry. A name listed twice in
+  the central directory is an open error; folder entries are not parts.
+- A zip entry is a part only if its name is a valid part URI and it has a
+  content type; a .rels part needs the relationships content type and its
+  elements the relationships namespace. Escaped reserved characters
+  (`%21`, `%2F`, ...) stay escaped when names are compared.
 - LoadReferencedPartsAndRelationships: an internal target that doesn't exist
   (hyperlinks and "NULL" targets load nothing; media, audio and video must
   exist); a part with a fixed content type and another one declared; one part
   reached by two relationship types; a part root that isn't the class's root.
+  An unknown relationship type loads an extended part, per package class: the
+  SDK's IPartFactoryFeature tables differ between Word, Excel and PowerPoint
+  (printer settings are known in a workbook, extended in a deck). A data part
+  (audio, video, media) referenced from a part class that doesn't know data
+  parts is `Pkg_DataPartReferenceIsNotAllowed`.
+
+## Excel and PowerPoint
+
+One table set covers all three: the schemas were already shared, so the WASM
+grew 7 KB (3,874,735 → 3,881,757 bytes; gzip +2 KB). What differs per format:
+- The package class: by extension in the CLI and oracle; for bytes, by the
+  main part's content type, then its root element.
+- Part factories and the application mask, both generated (`FACTORIES`,
+  `Constraint.apps`).
+- `Sem_CellValue`, the SDK's one hand-written validator (`CellType`): a cell
+  of type b, n or d must hold a value its type parses (.NET
+  `NumberStyles.Number | AllowExponent`, Infinity/NaN, `0/1/true/false`, an
+  `xsd:dateTime`). gen stops if another hand-written validator appears.
+- IndexReference counts what the SDK's traversal yields: typed elements and
+  `mc:AlternateContent` itself, not a Choice's or Fallback's content.
+- Model3D parts also accept `model/gltf.binary` (a hand-written content type
+  rule; gen stops if another appears).
+- Deferred constraints (a value defined later in the part) are deduplicated
+  per value and expanded into one error per element at the end, so a sheet of
+  a million bad style indexes costs a counter, not a million strings.
 
 ## Strict documents
 
@@ -120,8 +154,10 @@ gen stops if the SDK's set of translating classes changes.
 
 `fuzz/agree.sh VERSION` clones the SDK at that tag, regenerates the tables,
 builds the oracle against that NuGet release, and diffs every verdict on the
-SDK's own test documents, mutants of them, `fuzz/cases.py`'s problem
-documents and a generated report. CI runs it on every push against
+SDK's own test documents (Word, Excel, PowerPoint), mutants of them,
+`fuzz/cases.py`'s and `fuzz/cases_office.py`'s problem documents and a
+generated report; with `CORPORA=1`, Apache POI's and LibreOffice's test files
+at pinned commits too (`fuzz/corpora.sh`). CI runs it on every push against
 `SDK_VERSION`; weekly it fuzzes with a fresh seed and tries the newest release,
 opening a pull request when it agrees and an issue when it doesn't.
 

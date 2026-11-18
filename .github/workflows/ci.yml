@@ -21,7 +21,7 @@ jobs:
         with:
           node-version: 24
       - run: rustup target add wasm32-unknown-unknown
-      - run: WORK=$RUNNER_TEMP/agree fuzz/agree.sh
+      - run: WORK=$RUNNER_TEMP/agree CORPORA=1 fuzz/agree.sh
       # The npm package's WebAssembly build reports what the native one does.
       - run: scripts/build-npm.sh && node npm/same.mjs target/release/ooxml-validator $RUNNER_TEMP/agree/docs/all.txt
       - run: timeout 30 node npm/pool-exits.mjs | grep "unawaited still delivered"

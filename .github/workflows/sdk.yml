@@ -20,7 +20,7 @@ jobs:
         with:
           dotnet-version: 10.0.x
       - name: Fuzz the pinned release with a fresh seed
-        run: SEED=${{ github.run_number }} MUTANTS=2000 fuzz/agree.sh
+        run: SEED=${{ github.run_number }} MUTANTS=2000 CORPORA=1 fuzz/agree.sh
       - name: Newest release
         id: latest
         run: |

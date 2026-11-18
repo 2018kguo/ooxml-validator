@@ -1,12 +1,12 @@
 [package]
 name = "ooxml-validator"
-version = "0.2.0"
+version = "0.3.0"
 license = "MIT"
-description = "A streaming .docx validator that gives the Open XML SDK's verdicts"
+description = "A streaming .docx, .xlsx and .pptx validator that gives the Open XML SDK's verdicts"
 edition = "2024"
 repository = "https://github.com/2018kguo/ooxml-validator"
 readme = "README.md"
-keywords = ["docx", "ooxml", "openxml", "word", "validator"]
+keywords = ["docx", "xlsx", "pptx", "ooxml", "validator"]
 categories = ["parser-implementations", "command-line-utilities"]
 # The crate is the library and CLI; tests against the SDK and the npm build stay in the repository.
 exclude = ["fuzz", "bench", "npm", "docs", "scripts", ".github", "SDK_VERSION"]

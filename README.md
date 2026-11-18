@@ -1,5 +1,5 @@
 <h1 align="center">ooxml-validator</h1>
-<p align="center">Microsoft's Open XML SDK validator for Word documents, rewritten in Rust: the same verdicts, 24× faster, no .NET.</p>
+<p align="center">Microsoft's Open XML SDK validator for Word, Excel and PowerPoint files, rewritten in Rust: the same verdicts, 10–40× faster, no .NET.</p>
 <p align="center">
   <a href="#use-it">Get started</a> ·
   <a href="#how-it-agrees">How it agrees</a> ·
@@ -20,15 +20,20 @@ cargo install ooxml-validator              # a native binary
 ```
 
 ```sh
-$ ooxml-validator report.docx broken.docx
+$ ooxml-validator report.docx broken.docx ledger.xlsx
 report.docx: ok
 broken.docx: 3 errors
   /word/document.xml w:rPr Sch_UnexpectedElementContentExpectingComplex: The element 'w:rPr' has unexpected child element 'w:b'.
   /word/styles.xml w:shd Sch_MissRequiredAttribute: The required attribute 'val' is missing.
   /word/styles.xml w:tblPr Sch_UnexpectedElementContentExpectingComplex: The element 'w:tblPr' has unexpected child element 'w:tblBorders'.
+ledger.xlsx: 2 errors
+  /xl/workbook.xml workbook Sch_UnexpectedElementContentExpectingComplex: The element 'workbook' has unexpected child element 'definedNames'.
+  /xl/worksheets/sheet1.xml dataValidation Sem_AttributeValueDataTypeDetailed: Semantic constraint AttributeValueLength failed.
 ```
 
-It exits 1 when any file is invalid. `--json` prints one object per file with every error's id,
+A file is opened as its extension says: a Word document (.docx, .docm, .dotx, .dotm), a workbook
+(.xlsx, .xlsm, .xltx, .xltm, .xlam) or a presentation (.pptx, .pptm, .potx, .potm, .ppsx, .ppsm,
+.ppam). It exits 1 when any file is invalid. `--json` prints one object per file with every error's id,
 description, part and element, and `--max-errors N` caps the list (default 1000, as the SDK does).
 
 From JavaScript:
@@ -40,6 +45,9 @@ import { validate } from "@2018kguo/ooxml-validator";
 const report = await validate(await readFile("report.docx"));
 // { ok: false, openError: null, errors: [{ id, description, part, node, errorType, xpath }, ...] }
 ```
+
+Bytes carry no extension: a package is opened as the kind its main part's content type names, or
+as `{ format: "word" | "excel" | "powerpoint" }` says.
 
 `validate` runs on the thread that calls it. A server should keep that off its event loop:
 
@@ -57,6 +65,8 @@ From Rust:
 
 ```rust
 let report = ooxml_validator::check(&std::fs::read("report.docx")?);
+// Or as a given kind of package:
+let report = ooxml_validator::check_as(&bytes, Some(ooxml_validator::Format::Excel));
 for e in &report.errors {
     println!("{} {} {}: {}", e.part, e.node, e.id, e.description);
 }
@@ -64,15 +74,19 @@ for e in &report.errors {
 
 ## What it checks
 
-Everything `OpenXmlValidator(FileFormatVersions.Microsoft365)` checks in a .docx, with the SDK's
-error ids:
+Everything `OpenXmlValidator(FileFormatVersions.Microsoft365)` checks in a .docx, .xlsx or .pptx
+opened as a `WordprocessingDocument`, `SpreadsheetDocument` or `PresentationDocument`, with the
+SDK's error ids:
 
 - **The schema:** child order and counts, required and undeclared attributes, every simple type as
   .NET parses it (`Int32`, on/off, hex, unions, patterns, lengths), version-gated elements and
-  enum values.
+  enum values. WordprocessingML, SpreadsheetML, PresentationML and the DrawingML, chart, diagram
+  and VML parts they share.
 - **Markup compatibility:** `mc:Ignorable`, `mc:ProcessContent`, `mc:AlternateContent`.
 - **Semantic constraints:** unique ids, value ranges, attributes that require or exclude each
-  other, relationship ids and types, references into other parts.
+  other, relationship ids and types, references into other parts (a cell's style index, a pivot
+  table's cache field), each run only for the applications it names, as the SDK runs them. A
+  cell's value must suit its type (`Sem_CellValue`).
 - **The package:** required, allowed and repeated parts, and everything that keeps the SDK from
   opening a file at all: XML that isn't well formed, a missing part, a wrong content type, a bad
   relationship, an encoding .NET doesn't read.
@@ -95,6 +109,11 @@ Measured on an Apple M5 Pro, the median of 5 runs, each a fresh process so start
 |---|---:|---:|---:|
 | 400-page report | 47 ms, 13 MB | 216 ms, 87 MB | 1.14 s, 143 MB |
 | 419 SDK test documents | 181 ms, 16 MB | 547 ms, 95 MB | 5.26 s, 159 MB |
+| Workbook, 100,000 rows (36 MB sheet) | 451 ms, 54 MB | 940 ms, 131 MB | 5.84 s, 665 MB |
+| 300-slide deck | 16 ms, 11 MB | 124 ms, 84 MB | 664 ms, 97 MB |
+
+The workbook and deck rows were measured on a busier machine against the oracle's ordinary
+(not ReadyToRun) build; `bench/generate_office.py` writes both files.
 
 The SDK side is published ReadyToRun, its fastest setup. To rerun it:
 
@@ -116,22 +135,25 @@ The SDK is the reference, quirks included, and the tests check against the SDK i
 
 - `gen/` turns the SDK's own schema data, part definitions and constraint registrations into
   static tables, and stops if the SDK adds something it doesn't know how to port.
-- `fuzz/oracle` is a 60-line C# program around the SDK. `fuzz/diff.py` runs both on a list of files
-  and fails on any document where the verdict or the set of error ids differs.
-- `fuzz/agree.sh` checks the SDK's own test documents, 600 mutants of them, 97 documents with the
-  problems real producers write (LibreOffice, JavaScript and PDF converters) and a generated
-  report. CI runs it on every push.
+- `fuzz/oracle` is a 60-line C# program around the SDK; it opens each file as the package class its
+  extension names. `fuzz/diff.py` runs both on a list of files and fails on any document where the
+  verdict, the set of error ids, or each error's part and XPath differs.
+- `fuzz/agree.sh` checks the SDK's own test documents (419 Word, 377 Excel and PowerPoint), 600
+  mutants of each kind, 97 Word documents and 111 workbooks and decks with the problems real
+  producers write (LibreOffice, JavaScript and PDF converters, a writer that put named ranges
+  before the sheet list), Apache POI's and LibreOffice's 1,333 test workbooks and decks, and a
+  generated report. CI runs it on every push.
 - Every week CI fuzzes with a new seed and tries the newest SDK release on NuGet. A release that
   agrees becomes a pull request, one that doesn't becomes an issue.
-- Before release it also agreed with the SDK on 9,337 documents in all: those, plus more than
-  7,000 real-world files and their mutants.
+- Before release it also agreed with the SDK on 9,337 Word documents, and on nearly 6,000
+  workbooks and decks: those above, 1,089 real-world files and 3,000 mutants, every error at the
+  SDK's part and XPath.
 
 ## Limits
 
-- Word documents only (.docx, .docm, .dotx). Not Excel or PowerPoint.
 - The Microsoft365 file format only, the newest the SDK knows.
-- Error descriptions and order differ from the SDK's; the set of error ids doesn't.
-- Bounded where the SDK isn't: a .docx over 100 MB, or more than 128 MB of XML in
+- Error descriptions and order differ from the SDK's; the error ids, parts and XPaths don't.
+- Bounded where the SDK isn't: a package over 100 MB, or more than 128 MB of XML in
   all, is refused with an open error; each part keeps its first 1,000 errors (the
   SDK stops at 1,000 in all); the WebAssembly build stops at 1 GiB of memory.
 - Pinned to SDK 3.5.1 until the weekly job proposes a newer one.
