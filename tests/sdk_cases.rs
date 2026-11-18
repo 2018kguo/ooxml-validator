@@ -51,6 +51,27 @@ fn duplicate_id() {
     assert_eq!(ids(r#"<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:zz="urn:example:zz" ><w:body><w:p><w:bookmarkStart w:id="1" w:name="a"/><w:bookmarkEnd w:id="1"/><w:bookmarkStart w:id="1" w:name="b"/><w:bookmarkEnd w:id="1"/></w:p></w:body></w:document>"#), ["Sem_UniqueAttributeValue"]);
 }
 
+/// The SDK's XPaths: a duplicate value at its last element, last first.
+#[test]
+fn xpaths() {
+    let bm = |vals: &[u8]| vals.iter().enumerate().map(|(i, v)| format!(r#"<w:p><w:bookmarkStart w:id="{v}" w:name="b{i}"/><w:bookmarkEnd w:id="{v}"/></w:p>"#)).collect::<String>();
+    let doc = |body: &str| format!(r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body}</w:body></w:document>"#);
+    let paths = |body: &str| ooxml_validator::package::check(&docx(&doc(body))).errors.into_iter().map(|e| (e.id, e.xpath.unwrap_or_default())).collect::<Vec<_>>();
+    let unique = "Sem_UniqueAttributeValue";
+    let at = |p: u8, el: &str| format!("/w:document[1]/w:body[1]/w:p[{p}]/w:{el}[1]");
+    let mut three = paths(&bm(&[1, 1, 1]));
+    three.sort();
+    assert_eq!(three, [(unique, at(3, "bookmarkEnd")), (unique, at(3, "bookmarkStart"))]);
+    let mut two = paths(&bm(&[1, 2, 1, 2]));
+    two.sort();
+    assert_eq!(two, [(unique, at(3, "bookmarkEnd")), (unique, at(3, "bookmarkStart")), (unique, at(4, "bookmarkEnd")), (unique, at(4, "bookmarkStart"))]);
+    // The prefix LookupPrefix finds from the element up: here the one it declares.
+    let mut other = paths(r#"<w:p><x:r xmlns:x="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><x:bad/></x:r><nons/></w:p>"#);
+    other.sort();
+    let invalid = "Sch_InvalidElementContentExpectingComplex";
+    assert_eq!(other, [(invalid, "/w:document[1]/w:body[1]/w:p[1]".to_string()), (invalid, "/w:document[1]/w:body[1]/w:p[1]/x:r[1]".to_string())]);
+}
+
 #[test]
 fn empty_ac() {
     assert_eq!(ids(r#"<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:zz="urn:example:zz" ><w:body><w:p><mc:AlternateContent/></w:p></w:body></w:document>"#), ["Sch_IncompleteContentExpectingComplex"]);

@@ -305,7 +305,9 @@ pub fn validate(files: &Files) -> Outcome {
                 }
                 first_rel.push(rel.clone());
                 let n = nodes.len();
-                nodes.push(Node { path: path.clone(), class: cls, parent, children: vec![], facts: Facts::default(), has_root: false });
+                // Named as the package names it, whatever case the relationship used.
+                let name = files.get(&path).map_or_else(|| path.clone(), |(i, _)| files.entries[i].0.clone());
+                nodes.push(Node { path: name, class: cls, parent, children: vec![], facts: Facts::default(), has_root: false });
                 rels_of.push(Rels::default());
                 index.insert(path.clone(), n);
                 n
@@ -392,7 +394,7 @@ pub fn validate(files: &Files) -> Outcome {
     for (cls, path, kids) in containers {
         let Some(c) = cls else { continue }; // an extended part has no rules
         let part = path.map_or(String::new(), |p| format!("/{p}"));
-        let mut pkg = |id: &'static str, what: String| structure.push(ValidationError { id, description: what, part: part.clone(), node: String::new(), location: None, error_type: "Package" });
+        let mut pkg = |id: &'static str, what: String| structure.push(ValidationError { id, description: what, part: part.clone(), node: String::new(), location: None, error_type: "Package", xpath: None, at: None });
         for (k, _, rel) in kids.iter() {
             if child_class(c, rel).is_none() && k.is_some_and(|k| PARTS[k].version <= TARGET_VERSION) {
                 pkg("Pkg_PartIsNotAllowed", format!("{} cannot hold a part of type {rel}", PARTS[c].name));
@@ -438,8 +440,25 @@ pub fn validate(files: &Files) -> Outcome {
             _ => continue,
         };
         if !ok {
-            errors.push(ValidationError { id, description: format!("{:?} failed for '{}'.", c.kind, d.value), part: format!("/{}", nodes[n].path), node: d.node, error_type: "Semantic", location: None });
+            errors.push(ValidationError { id, description: format!("{:?} failed for '{}'.", c.kind, d.value), part: format!("/{}", nodes[n].path), node: d.node, error_type: "Semantic", location: None, xpath: None, at: d.at });
         }
+    }
+    // XPaths, from one more pass over each part that has errors.
+    let mut wanted: HashMap<String, Vec<usize>> = HashMap::new();
+    for e in &errors {
+        if let Some(at) = e.at {
+            wanted.entry(e.part.clone()).or_default().push(at);
+        }
+    }
+    let paths: HashMap<String, HashMap<usize, String>> = wanted
+        .into_iter()
+        .filter_map(|(part, at)| {
+            let xml = files.get(part.strip_prefix('/')?)?.1;
+            Some((part, crate::xpath::xpaths(xml, &at)))
+        })
+        .collect();
+    for e in &mut errors {
+        e.xpath = e.at.and_then(|at| paths.get(&e.part)?.get(&at).cloned());
     }
     Outcome { errors, parsed, malformed, open_error: open_error.or(rels_error) }
 }
@@ -477,7 +496,7 @@ impl Report {
         self.open_error.is_none() && self.errors.is_empty()
     }
 
-    /// {"ok","openError","errors":[{"id","description","part","node","errorType"}]},
+    /// {"ok","openError","errors":[{"id","description","part","node","errorType","line"?,"column"?,"xpath"?}]},
     /// with at most `max` errors (0: all).
     pub fn to_json(&self, max: usize) -> String {
         let n = if max == 0 { self.errors.len() } else { self.errors.len().min(max) };
@@ -485,7 +504,8 @@ impl Report {
             .iter()
             .map(|e| {
                 let at = e.location.map_or(String::new(), |(l, c)| format!(",\"line\":{l},\"column\":{c}"));
-                format!("{{\"id\":{},\"description\":{},\"part\":{},\"node\":{},\"errorType\":{}{at}}}", json(e.id), json(&e.description), json(&e.part), json(&e.node), json(e.error_type))
+                let xpath = e.xpath.as_deref().map_or(String::new(), |x| format!(",\"xpath\":{}", json(x)));
+                format!("{{\"id\":{},\"description\":{},\"part\":{},\"node\":{},\"errorType\":{}{at}{xpath}}}", json(e.id), json(&e.description), json(&e.part), json(&e.node), json(e.error_type))
             })
             .collect();
         let open = self.open_error.as_deref().map_or("null".to_string(), json);
@@ -576,7 +596,7 @@ pub fn check(bytes: &[u8]) -> Report {
         }
         if let Err(e) = well_formed(xml) {
             let location = Some(crate::validate::line_column(xml, e.at));
-            out.malformed = Some((i, ValidationError { id: "xml_parse", description: e.message, part: format!("/{name}"), node: String::new(), location, error_type: "Xml" }));
+            out.malformed = Some((i, ValidationError { id: "xml_parse", description: e.message, part: format!("/{name}"), node: String::new(), location, error_type: "Xml", xpath: None, at: None }));
             break;
         }
     }
@@ -584,7 +604,7 @@ pub fn check(bytes: &[u8]) -> Report {
         && out.malformed.as_ref().is_none_or(|m| i < m.0)
     {
         let part = format!("/{}", files.entries[i].0);
-        out.malformed = Some((i, ValidationError { id: "xml_parse", description: message, part, node: String::new(), location: None, error_type: "Xml" }));
+        out.malformed = Some((i, ValidationError { id: "xml_parse", description: message, part, node: String::new(), location: None, error_type: "Xml", xpath: None, at: None }));
     }
     if let Some((_, e)) = out.malformed {
         return Report { open_error: Some(e.description.clone()), errors: vec![e] };

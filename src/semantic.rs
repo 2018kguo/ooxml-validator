@@ -30,6 +30,7 @@ pub struct Deferred {
     pub constraint: u32,
     pub value: String,
     pub node: String,
+    pub at: Option<usize>,
 }
 
 /// An attribute as constraints see it (AttributeEntry): declared, maybe present.

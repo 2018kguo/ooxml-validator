@@ -30,6 +30,10 @@ pub struct ValidationError {
     pub error_type: &'static str,
     /// Where an XML parse error is: (line, column), both from 1.
     pub location: Option<(u32, u32)>,
+    /// The element's XPath as the SDK writes it, e.g. `/w:document[1]/w:body[1]/w:p[3]`.
+    pub xpath: Option<String>,
+    /// Where the element's name starts in its part, to build `xpath` from.
+    pub(crate) at: Option<usize>,
 }
 
 /// The most errors one part keeps.
@@ -113,6 +117,7 @@ struct Frame<'a> {
 
 pub struct Part<'a> {
     reader: Reader<'a>,
+    xml: &'a [u8],
     part: &'a str,
     /// In-scope namespace declarations: (prefix, URI, namespace id), and
     /// each prefix packed (see `key`) for a scan without memcmp.
@@ -136,8 +141,8 @@ pub struct Part<'a> {
     dynamic: HashMap<&'a [u8], u32>,
     pub errors: Vec<ValidationError>,
     rels: &'a Rels,
-    /// UniqueAttributeValue: constraint → (value → count, an element name).
-    unique: HashMap<u32, (HashMap<String, u32>, String)>,
+    /// UniqueAttributeValue: constraint → value → (count, the last element holding it).
+    unique: HashMap<u32, HashMap<String, (u32, &'a str)>>,
     pub facts: Facts,
     pub deferred: Vec<Deferred>,
     /// Per open AlternateContent: the errors its own MC attributes raised,
@@ -162,6 +167,7 @@ impl<'a> Part<'a> {
             facts: Facts::default(),
             deferred: vec![],
             reader: Reader::new(xml),
+            xml,
             part,
             bindings: vec![(b"xml", XML_NS, ns_ids()[XML_NS])],
             keys: vec![key(b"xml")],
@@ -209,6 +215,12 @@ impl<'a> Part<'a> {
         *self.dynamic.entry(uri).or_insert(n)
     }
 
+    /// Where `node` starts in the part, when it is the element's name as written.
+    fn at(&self, node: &str) -> Option<usize> {
+        let at = (node.as_ptr() as usize).wrapping_sub(self.xml.as_ptr() as usize);
+        (at < self.xml.len()).then_some(at)
+    }
+
     fn error(&mut self, id: &'static str, node: &str, description: String) {
         self.error_typed(id, node, description, "Schema");
     }
@@ -220,7 +232,7 @@ impl<'a> Part<'a> {
         if self.errors.len() >= MAX_PART_ERRORS {
             return;
         }
-        self.errors.push(ValidationError { id, description, part: self.part.to_string(), node: node.to_string(), error_type, location: None });
+        self.errors.push(ValidationError { id, description, part: self.part.to_string(), node: node.to_string(), error_type, location: None, xpath: None, at: self.at(node) });
     }
 
     /// The nearest typed frame, through transparent ones.
@@ -248,15 +260,13 @@ impl<'a> Part<'a> {
         loop {
             match self.reader.next()? {
                 Event::Eof => {
-                    // One error per value seen more than once (DuplicateFinder).
-                    let mut unique: Vec<_> = self.unique.drain().collect();
-                    unique.sort_by_key(|u| u.0);
-                    for (_, (counts, node)) in unique {
-                        for (v, n) in counts {
-                            if n > 1 && !v.is_empty() {
-                                self.error_typed("Sem_UniqueAttributeValue", &node, format!("Attribute has duplicate value '{v}'."), "Semantic");
-                            }
-                        }
+                    // One error per value seen more than once (DuplicateFinder),
+                    // last first: the SDK's semantic pass meets them that way.
+                    let mut dups: Vec<(&'a str, String)> =
+                        self.unique.drain().flat_map(|(_, values)| values.into_iter().filter(|(v, (n, _))| *n > 1 && !v.is_empty()).map(|(v, (_, node))| (node, v))).collect();
+                    dups.sort_by_key(|(node, _)| std::cmp::Reverse(node.as_ptr() as usize));
+                    for (node, v) in dups {
+                        self.error_typed("Sem_UniqueAttributeValue", node, format!("Attribute has duplicate value '{v}'."), "Semantic");
                     }
                     return Ok(PartResult { errors: self.errors, facts: self.facts, deferred: self.deferred });
                 }
@@ -436,7 +446,7 @@ impl<'a> Part<'a> {
         // Inside AlternateContent: check its shape as AlternateContentValidator
         // does, and pick the branch as GetContentFromACBlock does.
         if let Kind::Alternate { chosen, state, count, opaque } = parent.kind {
-            let ac = self.frame_name(self.frames.len() - 1).to_string();
+            let ac = self.frame_name(self.frames.len() - 1);
             let choice = is_mc && local == b"Choice";
             let fallback = is_mc && local == b"Fallback";
             let invalid = "Sch_InvalidElementContentExpectingComplex";
@@ -504,7 +514,7 @@ impl<'a> Part<'a> {
             // A leaf's children are not validated; the first is an error.
             if !self.frames[owner].leaf_child {
                 self.frames[owner].leaf_child = true;
-                let name = self.frame_name(owner).to_string();
+                let name = self.frame_name(owner);
                 self.error("Sch_InvalidChildinLeafElement", &name, format!("The element '{name}' is a leaf element and cannot contain children."));
             }
             return Kind::Skip;
@@ -640,7 +650,7 @@ impl<'a> Part<'a> {
             })
             .collect();
         for id in bad {
-            self.errors.push(ValidationError { id, description: format!("'{qname}' carries an attribute markup compatibility does not allow."), part: self.part.to_string(), node: qname.to_string(), error_type: "MarkupCompatibility", location: None });
+            self.errors.push(ValidationError { id, description: format!("'{qname}' carries an attribute markup compatibility does not allow."), part: self.part.to_string(), node: qname.to_string(), error_type: "MarkupCompatibility", location: None, xpath: None, at: self.at(qname) });
         }
     }
 
@@ -649,7 +659,7 @@ impl<'a> Part<'a> {
     fn acb(&mut self, qname: &str, choice: bool) {
         // Requires is declared on Choice only.
         if !choice && self.reader.attrs.iter().any(|a| a.name == b"Requires") {
-            self.errors.push(ValidationError { id: "MC_ErrorOnUnprefixedAttributeName", description: "Fallback cannot carry Requires.".into(), part: self.part.to_string(), node: qname.to_string(), location: None, error_type: "MarkupCompatibility" });
+            self.errors.push(ValidationError { id: "MC_ErrorOnUnprefixedAttributeName", description: "Fallback cannot carry Requires.".into(), part: self.part.to_string(), node: qname.to_string(), location: None, error_type: "MarkupCompatibility", xpath: None, at: self.at(qname) });
         }
         self.extended_mc(qname);
         if let Some(again) = self.ac_mc.last().cloned() {
@@ -717,7 +727,7 @@ impl<'a> Part<'a> {
 
     fn mc_error(&mut self, id: &'static str, node: &str, value: &[u8]) {
         let value = String::from_utf8_lossy(value);
-        self.errors.push(ValidationError { id, description: format!("The markup compatibility attribute value '{value}' is invalid."), part: self.part.to_string(), node: node.to_string(), error_type: "MarkupCompatibility", location: None });
+        self.errors.push(ValidationError { id, description: format!("The markup compatibility attribute value '{value}' is invalid."), part: self.part.to_string(), node: node.to_string(), error_type: "MarkupCompatibility", location: None, xpath: None, at: self.at(node) });
     }
 
     /// SchemaTypeValidator.ValidateAttributes.
@@ -780,7 +790,7 @@ impl<'a> Part<'a> {
     }
 
     /// The type's semantic constraints, and the values other parts may refer to.
-    fn semantics(&mut self, t: u16, declared: &'static [Attr], values: &[Option<Cow<'a, str>>], qname: &str) {
+    fn semantics(&mut self, t: u16, declared: &'static [Attr], values: &[Option<Cow<'a, str>>], qname: &'a str) {
         let ty = &TYPES[t as usize];
         if ty.constraints.1 == 0 && !semantic::type_flags(t).0 {
             return;
@@ -799,10 +809,11 @@ impl<'a> Part<'a> {
                 Outcome::Pass => {}
                 Outcome::Error(id) => self.error_typed(id, qname, format!("Semantic constraint {:?} failed.", CONSTRAINTS[i as usize].kind), "Semantic"),
                 Outcome::Unique(v) => {
-                    let e = self.unique.entry(i).or_insert_with(|| (HashMap::new(), qname.to_string()));
-                    *e.0.entry(v).or_default() += 1;
+                    // The SDK reports a duplicate at the last element holding that value.
+                    let e = self.unique.entry(i).or_default().entry(v).or_insert((0, qname));
+                    *e = (e.0 + 1, qname);
                 }
-                Outcome::Defer(value) => self.deferred.push(Deferred { constraint: i, value, node: qname.to_string() }),
+                Outcome::Defer(value) => self.deferred.push(Deferred { constraint: i, value, node: qname.to_string(), at: self.at(qname) }),
             }
         }
     }
@@ -980,7 +991,7 @@ pub fn validate_part(xml: &[u8], part: &str, root: u16, rels: &Rels, strict: boo
     match Part::new(xml, part, rels, strict).run(root) {
         Ok(r) => r,
         Err(e) => PartResult {
-            errors: vec![ValidationError { id: "xml_parse", description: e.message, part: part.to_string(), node: String::new(), location: Some(line_column(xml, e.at)), error_type: "Xml" }],
+            errors: vec![ValidationError { id: "xml_parse", description: e.message, part: part.to_string(), node: String::new(), location: Some(line_column(xml, e.at)), error_type: "Xml", xpath: None, at: None }],
             facts: Facts::default(),
             deferred: vec![],
         },

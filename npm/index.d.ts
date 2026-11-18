@@ -8,6 +8,8 @@ export interface ValidationError {
   node: string;
   /** "Schema", "Semantic", "Package", "MarkupCompatibility" or "Xml". */
   errorType: string;
+  /** The SDK's XPath to the element, e.g. "/w:document[1]/w:body[1]/w:p[3]"; absent for package and parse errors. */
+  xpath?: string;
   /** For XML that isn't well formed: where, counting from 1. */
   line?: number;
   column?: number;

@@ -448,6 +448,11 @@ fn main() {
     }
 
     writeln!(s, "pub static NAMESPACES: [&str; {}] = {:?};\n", out.ns.len(), out.ns).unwrap();
+    // The SDK's own prefix for each namespace (OpenXmlNamespaceResolver), used
+    // in an XPath when the document binds the namespace to no prefix.
+    let prefix_of: HashMap<&String, &String> = out.prefixes.iter().map(|(p, u)| (u, p)).collect();
+    let prefixes: Vec<&str> = out.ns.iter().map(|u| prefix_of.get(u).map_or("", |p| p.as_str())).collect();
+    writeln!(s, "/// Each namespace's prefix in the SDK (\"\" for none).\npub static PREFIXES: [&str; {}] = {:?};\n", prefixes.len(), prefixes).unwrap();
     let versions: Vec<u8> = out.ns.iter().map(|u| ns_version.get(u).map_or(u8::MAX, |&v| v as u8)).collect();
     writeln!(s, "/// The version that introduced each namespace (u8::MAX: not a known namespace).\npub static NAMESPACE_VERSIONS: [u8; {}] = {:?};\n", versions.len(), versions).unwrap();
     writeln!(s, "pub const TARGET_VERSION: u8 = {TARGET};\n").unwrap();

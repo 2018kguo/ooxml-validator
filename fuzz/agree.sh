@@ -26,7 +26,7 @@ echo "$docs/report.docx" >> "$docs/all.txt"
 echo "SDK $version: $(wc -l < "$docs/all.txt" | tr -d ' ') documents"
 
 status=0
-ORACLE=$work/oracle/Oracle.dll python3 fuzz/diff.py "$docs/all.txt" "$work/diff" --jobs "${JOBS:-4}" || status=1
+ORACLE=$work/oracle/Oracle.dll python3 fuzz/diff.py "$docs/all.txt" "$work/diff" --jobs "${JOBS:-4}" --xpath || status=1
 if ! git diff --quiet src/schema_gen.rs; then
   echo "schema tables differ from SDK $version: commit the regenerated src/schema_gen.rs"
   status=1

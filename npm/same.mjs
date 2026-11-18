@@ -18,7 +18,7 @@ for (let i = 0; i < paths.length; i += 200) {
   const native = out.toString().split("\n").filter(Boolean).map((l) => JSON.parse(l));
   for (const n of native) {
     const w = await validate(await readFile(n.path), { maxErrors: 0 });
-    const key = (r) => JSON.stringify([r.ok, !!r.openError, r.errors.map((e) => e.id)]);
+    const key = (r) => JSON.stringify([r.ok, !!r.openError, r.errors.map((e) => [e.id, e.part, e.xpath])]);
     if (key(w) !== key(n)) {
       differ++;
       console.log("differs:", n.path);

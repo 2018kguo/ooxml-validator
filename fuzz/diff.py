@@ -1,6 +1,6 @@
 """Differential check: ooxml-validator vs the Open XML SDK on a list of .docx files.
 
-usage: python3 fuzz/diff.py LIST OUT_DIR [--jobs N] [--schema]
+usage: python3 fuzz/diff.py LIST OUT_DIR [--jobs N] [--schema] [--xpath]
   LIST: one .docx path per line. OOXML_VALIDATOR is the ooxml-validator binary (default
   target/release/ooxml-validator); ORACLE the built SDK oracle (default
   fuzz/oracle/bin/out/Oracle.dll: dotnet build -c Release -o bin/out there).
@@ -10,6 +10,7 @@ exits 1 on any disagreement:
   danger  ooxml-validator accepts what the SDK rejects   (must be zero)
   extra   ooxml-validator rejects what the SDK accepts
   ids     both reject, with different error id multisets
+  xpath   (--xpath) same ids, but not each at the same part and XPath
 """
 import collections, json, os, subprocess, sys, threading
 
@@ -41,6 +42,7 @@ def main():
     paths = [l.strip() for l in open(sys.argv[1]) if l.strip()]
     outdir = sys.argv[2]; os.makedirs(outdir, exist_ok=True)
     global schema_only; schema_only = "--schema" in sys.argv
+    global xpaths; xpaths = "--xpath" in sys.argv
     jobs = int(sys.argv[sys.argv.index("--jobs") + 1]) if "--jobs" in sys.argv else 6
     here = os.path.dirname(os.path.abspath(__file__))
     s = sdk(paths, os.environ.get("ORACLE", os.path.join(here, "oracle/bin/out/Oracle.dll")), jobs)
@@ -64,6 +66,17 @@ def main():
         elif mine and not sdk_ids: kind = "extra"
         elif set(sdk_ids) == set(mine): kind = "agree-bad"
         else: kind = "ids"
+        # The oracle keeps every error; we keep 1000 per part, as the SDK's validator does.
+        capped = max(collections.Counter(e["part"] for e in b["errors"]).values(), default=0) >= 1000
+        if kind == "agree-bad" and xpaths and not capped:
+            # Where each error is: the same (id, part, XPath) multiset as the SDK.
+            theirs = collections.Counter((e["Id"], e.get("Part") or "", e.get("XPath") or "") for e in a["Errors"])
+            ours = collections.Counter((e["id"], e.get("part") or "", e.get("xpath") or "") for e in b["errors"])
+            if theirs != ours:
+                kind = "xpath"
+                counts[kind] += 1
+                rows.append({"kind": kind, "path": path, "sdk": sorted(theirs - ours)[:5], "ooxml-validator": sorted(ours - theirs)[:5]})
+                continue
         counts[kind] += 1
         if kind in ("danger", "extra", "ids"):
             first = next((e for e in a["Errors"] if e["Id"] in set(sdk_ids) - set(mine)), a["Errors"][0] if a["Errors"] else None)

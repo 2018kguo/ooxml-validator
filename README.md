@@ -38,7 +38,7 @@ import { readFile } from "node:fs/promises";
 import { validate } from "@2018kguo/ooxml-validator";
 
 const report = await validate(await readFile("report.docx"));
-// { ok: false, openError: null, errors: [{ id, description, part, node, errorType }, ...] }
+// { ok: false, openError: null, errors: [{ id, description, part, node, errorType, xpath }, ...] }
 ```
 
 `validate` runs on the thread that calls it. A server should keep that off its event loop:
@@ -46,9 +46,12 @@ const report = await validate(await readFile("report.docx"));
 ```js
 import { createValidatorPool } from "@2018kguo/ooxml-validator/worker";
 
-using pool = createValidatorPool({ threads: 2 });
-const report = await pool.validate(bytes, { maxErrors: 50 });
+using pool = createValidatorPool({ threads: 2, onReplace: (reason) => metrics.count(reason) });
+const report = await pool.validate(bytes, { maxErrors: 50, timeoutMs: 15_000 });
 ```
+
+A call past `timeoutMs` rejects with a `TimeoutError` and its worker is replaced; `onReplace` hears
+every replacement (`"timeout"`, `"exit"`, or `"memory"` for a worker retired after a large document).
 
 From Rust:
 
@@ -75,8 +78,9 @@ error ids:
   relationship, an encoding .NET doesn't read.
 - **Strict documents (ISO 29500):** read as Transitional, as the SDK reads them.
 
-Descriptions follow the SDK's wording without its long expected-element lists, and an error names
-its element rather than an XPath. A parse error carries its line and column.
+Descriptions follow the SDK's wording without its long expected-element lists. An error names its
+element and gives the SDK's XPath to it (`/w:document[1]/w:body[1]/w:p[3]`), checked against the SDK
+with the error ids. A parse error carries its line and column instead.
 
 ## How fast
 

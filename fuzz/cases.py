@@ -184,6 +184,11 @@ cases.update({
     "41_rel_other_child": dict(rels_extra='<Other/>'),
     "41_rel_id_not_ncname": dict(rels_extra=f'<Relationship Id="1abc" Type="{REL}hyperlink" Target="http://x" TargetMode="External"/>'),
     "42_duplicate_override": dict(ct_extra=f'<Override PartName="/word/styles.xml" ContentType="{CT["styles"]}"/>'),
+    # XPaths (diff.py --xpath): a duplicate is reported at its last element.
+    "45_unique_three": dict(body='<w:p><w:bookmarkStart w:id="1" w:name="b0"/><w:r><w:t>x</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p><w:p><w:bookmarkStart w:id="1" w:name="b1"/><w:r><w:t>x</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p><w:p><w:bookmarkStart w:id="1" w:name="b2"/><w:r><w:t>x</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p>'),
+    "45_unique_two_values": dict(body='<w:p><w:bookmarkStart w:id="1" w:name="b0"/><w:r><w:t>x</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p><w:p><w:bookmarkStart w:id="2" w:name="b1"/><w:r><w:t>x</w:t></w:r><w:bookmarkEnd w:id="2"/></w:p><w:p><w:bookmarkStart w:id="1" w:name="b2"/><w:r><w:t>x</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p><w:p><w:bookmarkStart w:id="2" w:name="b3"/><w:r><w:t>x</w:t></w:r><w:bookmarkEnd w:id="2"/></w:p>'),
+    # A second prefix for the main namespace, and an element in no namespace.
+    "45_xpath_prefixes": dict(body='<w:p><x:r xmlns:x="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><x:bad/></x:r><nons/></w:p>'),
 })
 for name, kw in cases.items():
     build(name, **kw)
